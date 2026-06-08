@@ -130,7 +130,7 @@ In Streamlit Studio, the YOLO dropdown is populated from:
 
 If the dropdown is empty, the `.pt` file is missing or the app needs a refresh.
 
-## Why `vision_empty` Happens
+## ❔ Why `vision_empty` Happens
 
 `vision_empty` means YOLO ran successfully but did not detect any object class it knows about.
 
@@ -150,7 +150,7 @@ Options:
 3. Use a custom YOLO model trained for your target defect classes.
 4. Add a local vision-language captioning step for richer image descriptions.
 
-## OCR vs YOLO Decision Guide
+## 🧭 OCR vs YOLO Decision Guide
 
 Use OCR when the user will ask:
 
@@ -178,7 +178,7 @@ Describe this uploaded photo.
 
 YOLO is object detection. It is not a general image understanding model.
 
-## Local-Only Guarantee
+## 🔒 Local-Only Guarantee
 
 mapMyVault does not auto-upload images, PDFs, OCR text, or YOLO outputs.
 

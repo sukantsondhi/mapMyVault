@@ -1,4 +1,4 @@
-# mapMyVault
+# 🗺️ mapMyVault
 
 mapMyVault turns a local folder into a private, searchable knowledge base for local LLMs.
 
@@ -8,7 +8,7 @@ It indexes files on your own machine, stores the results in SQLite, builds a loc
 
 The detailed pipeline is also documented in [Architecture](docs/ARCHITECTURE.md). A static image is used here so the README renders consistently even in viewers that do not support Mermaid.
 
-## What It Does
+## ✨ What It Does
 
 | Area | Details |
 |---|---|
@@ -21,7 +21,7 @@ The detailed pipeline is also documented in [Architecture](docs/ARCHITECTURE.md)
 | Obsidian export | Writes mirrored Markdown notes under `obsidian/` |
 | MCP tools | Lets local clients such as Open WebUI/MCPO/OpenClaw query the index |
 
-## Streamlit UI
+## 🖥️ Streamlit UI
 
 ![Chat Window](./docs/assets/Chat-Window.png)
 ![Knowledge Window 1](./docs/assets/Knowledge-Window-1.png)
@@ -29,7 +29,7 @@ The detailed pipeline is also documented in [Architecture](docs/ARCHITECTURE.md)
 ![Graph View Window](./docs/assets/GraphView-Window.png)
 
 
-## Output Layout
+## 📦 Output Layout
 
 ```text
 mapmyvault-output/
@@ -51,7 +51,7 @@ Important notes:
 - The output folder must be outside the source folder.
 - Generated Obsidian notes are written under `obsidian/`, not into your source folder.
 
-## Fast Start
+## ⚡ Fast Start
 
 ```powershell
 git clone https://github.com/sukantsondhi/mapMyVault.git
@@ -84,7 +84,7 @@ http://127.0.0.1:8788
 
 Full setup guide: [docs/SETUP.md](docs/SETUP.md)
 
-## Recommended Workflow
+## 🧭 Recommended Workflow
 
 1. Open `Knowledge`.
 2. Choose the source folder you want to index.
@@ -103,7 +103,7 @@ Index first, Obsidian second:
 Source files -> SQLite/Chroma local index -> Chat/MCP -> Optional Obsidian export
 ```
 
-## CLI Commands
+## ⌨️ CLI Commands
 
 ```powershell
 mapmyvault map C:\path\to\source --output C:\path\to\mapmyvault-output
@@ -115,7 +115,7 @@ mapmyvault export-vault C:\path\to\mapmyvault-output
 mapmyvault serve C:\path\to\mapmyvault-output
 ```
 
-## Optional OCR And YOLO
+## 🔤 Optional OCR And YOLO
 
 OCR and YOLO are separate features:
 
@@ -135,7 +135,7 @@ Then use `yolov8n.pt` in the Streamlit dropdown or CLI. mapMyVault does not auto
 
 Detailed guide: [docs/OCR_AND_VISION.md](docs/OCR_AND_VISION.md)
 
-## Documentation
+## 📚 Documentation
 
 | Document | Purpose |
 |---|---|
@@ -146,7 +146,7 @@ Detailed guide: [docs/OCR_AND_VISION.md](docs/OCR_AND_VISION.md)
 | [Integrations](docs/INTEGRATIONS.md) | MCP, MCPO, Open WebUI, slash prompt |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Known errors and fixes |
 
-## Local-Only Boundary
+## 🔒 Local-Only Boundary
 
 Allowed model/tool endpoints:
 
@@ -156,7 +156,7 @@ Allowed model/tool endpoints:
 
 mapMyVault rejects remote Ollama URLs. External tools should also be configured without web search or cloud model providers if strict privacy is required.
 
-## PR-Ready Checks
+## ✅ PR-Ready Checks
 
 Run these before opening a PR:
 
@@ -172,6 +172,6 @@ For UI changes:
 mapmyvault studio
 ```
 
-## License
+## 📄 License
 
 MIT. See [LICENSE](LICENSE).

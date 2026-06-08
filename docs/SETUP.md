@@ -20,7 +20,7 @@ Optional:
 - Poppler for PDF-to-image conversion
 - YOLO `.pt` weights plus `ultralytics` for image object labels
 
-## 1. Clone And Create The Virtual Environment
+## 🧬 1. Clone And Create The Virtual Environment
 
 ```powershell
 git clone https://github.com/sukantsondhi/mapMyVault.git
@@ -49,7 +49,7 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-## 2. Install Local Ollama Models
+## 🤖 2. Install Local Ollama Models
 
 Start Ollama, then pull the default models:
 
@@ -83,7 +83,7 @@ ollama_no_cloud: true
 
 If a model check is false, pull that model or select a model you already have in the UI.
 
-## 3. Run Streamlit Studio
+## 🖥️ 3. Run Streamlit Studio
 
 ```powershell
 mapmyvault studio
@@ -101,7 +101,7 @@ Use the sidebar:
 - `Knowledge`: create or update the local index.
 - `Graph View`: browse indexed folders, remove indexed folders/files, and update only changed work.
 
-## 4. Create Your First Local Index
+## 🗂️ 4. Create Your First Local Index
 
 In `Knowledge`:
 
@@ -129,7 +129,7 @@ Output: C:\Users\me\Documents\MyFolder\mapmyvault-output
 
 The output must not be inside the source folder.
 
-## 5. Optional OCR Setup
+## 🔤 5. Optional OCR Setup
 
 OCR is needed when PDFs/images contain text that is not extractable normally.
 
@@ -164,7 +164,7 @@ mapmyvault map C:\path\to\source --output C:\path\to\output `
   --ocr-max-pages 10
 ```
 
-## 6. Optional YOLO Image Vision Setup
+## 🖼️ 6. Optional YOLO Image Vision Setup
 
 YOLO adds object labels to normal image files. It is optional and local.
 
@@ -209,7 +209,7 @@ Notes:
 - mapMyVault does not auto-download YOLO weights during indexing.
 - `yolov8n.pt` is a general object detector. It may not detect specialist details such as scratches, scuffs, dents, or alloy wheel damage.
 
-## 7. Optional Obsidian Export
+## 📝 7. Optional Obsidian Export
 
 Index first. Export Obsidian after the index is ready.
 
@@ -223,7 +223,7 @@ Obsidian notes are written to:
 C:\path\to\mapmyvault-output\obsidian
 ```
 
-## 8. CLI-Only Workflow
+## ⌨️ 8. CLI-Only Workflow
 
 ```powershell
 mapmyvault map C:\path\to\source --output C:\path\to\mapmyvault-output
@@ -232,7 +232,7 @@ mapmyvault query C:\path\to\mapmyvault-output "what documents mention rent?"
 mapmyvault export-vault C:\path\to\mapmyvault-output
 ```
 
-## 9. Verify The Repo
+## ✅ 9. Verify The Repo
 
 Run before opening a PR:
 

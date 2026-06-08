@@ -1,4 +1,4 @@
-# Architecture
+# 🏗️ Architecture
 
 mapMyVault is a local-first indexing and retrieval platform.
 
@@ -9,17 +9,17 @@ It has four main responsibilities:
 3. Build derived search, graph, and vault artifacts.
 4. Expose local query and action interfaces.
 
-## High-Level Flow
+## 🔁 High-Level Flow
 
 ![Mermaid Diagram](./assets/Mermaid%20Diagram.png)
 
 If Mermaid does not render in your viewer, use the static image below.
 
-## Architecture Diagram
+## 🧩 Architecture Diagram
 
 ![mapMyVault local-first architecture](assets/architecture.png)
 
-## Main Modules
+## 🧱 Main Modules
 
 | Module | Role |
 |---|---|
@@ -38,7 +38,7 @@ If Mermaid does not render in your viewer, use the static image below.
 | `src/doctor.py` | Local readiness checks |
 | `src/terminal_ui.py` | Interactive terminal prompts |
 
-## Pipeline Stages
+## 🛠️ Pipeline Stages
 
 | Stage | What Happens | Stored In |
 |---|---|---|
@@ -54,7 +54,7 @@ If Mermaid does not render in your viewer, use the static image below.
 | Search Index | Rebuild SQLite full-text search | `files_fts` |
 | Manifest | Record config, versions, endpoints, tools | `data/manifest.json` |
 
-## Incremental Behavior
+## ♻️ Incremental Behavior
 
 mapMyVault stores stage status per file. A rerun processes only missing, failed, stale, or invalidated work.
 
@@ -69,7 +69,7 @@ Invalidation rules:
 - Export template change invalidates Obsidian export only.
 - Deleted files are soft-deleted and removed from search/vector results.
 
-## Storage Ownership
+## 🗄️ Storage Ownership
 
 | Artifact | Owner | Rebuildable? |
 |---|---|---|
@@ -82,7 +82,7 @@ Invalidation rules:
 
 SQLite is the source of truth. If derived artifacts are corrupt or stale, they can be rebuilt from SQLite/source files.
 
-## Local-Only Boundary
+## 🔒 Local-Only Boundary
 
 Allowed model/tool endpoints:
 
@@ -106,7 +106,7 @@ Local components:
 
 Manual model downloads are possible, but mapMyVault does not auto-download YOLO weights during indexing.
 
-## Model Roles
+## 🤖 Model Roles
 
 | Model Type | Used For | Example |
 |---|---|---|
@@ -116,7 +116,7 @@ Manual model downloads are possible, but mapMyVault does not auto-download YOLO 
 
 Embedding model consistency matters. Existing indexes should be updated with the same embedding model used originally.
 
-## Libraries And Frameworks
+## 📚 Libraries And Frameworks
 
 | Library / Tool | Used For |
 |---|---|

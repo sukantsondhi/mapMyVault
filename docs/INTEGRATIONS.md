@@ -10,7 +10,7 @@ mapMyVault can be used from:
 
 All integrations should stay on loopback addresses.
 
-## Open WebUI With MCPO
+## 🌐 Open WebUI With MCPO
 
 Open WebUI may ask for a valid JSON/OpenAPI spec when connecting directly to MCP. The reliable local route is:
 
@@ -49,7 +49,7 @@ Auth: None
 Headers: {}
 ```
 
-## Slash Command Prompt
+## 💬 Slash Command Prompt
 
 Use a prompt like this for a mapMyVault slash command:
 
@@ -73,7 +73,7 @@ Rules:
 
 If Open WebUI shows the whole slash prompt in the text box, that is Open WebUI behavior. The prompt can still work, but the model must actually call the tool. If it writes fake tool output, tighten the prompt and use a model that reliably supports tools.
 
-## MCP Tools
+## 🧰 MCP Tools
 
 | Tool                   | Purpose                                              |
 | ---------------------- | ---------------------------------------------------- |
@@ -90,7 +90,7 @@ If Open WebUI shows the whole slash prompt in the text box, that is Open WebUI b
 | `read_file_excerpt`    | Bounded extracted text excerpt                       |
 | `propose_move_files`   | Create action plan only; no direct apply             |
 
-## CLI Query
+## ⌨️ CLI Query
 
 ```powershell
 mapmyvault query C:\path\to\mapmyvault-output "how many documents mention [Specific thing]?"
@@ -98,7 +98,7 @@ mapmyvault query C:\path\to\mapmyvault-output "how many documents mention [Speci
 
 This reads the local SQLite/Chroma index. It does not search the web.
 
-## Local Server Ports
+## 🔌 Local Server Ports
 
 | Service          | Default                     |
 | ---------------- | --------------------------- |
@@ -109,7 +109,7 @@ This reads the local SQLite/Chroma index. It does not search the web.
 
 Do not expose these ports publicly.
 
-## Keep External Tools Local
+## 🔒 Keep External Tools Local
 
 For Open WebUI, OpenClaw, or similar tools:
 

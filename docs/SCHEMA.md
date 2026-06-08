@@ -8,7 +8,7 @@ The canonical database is:
 
 SQLite is the source of truth. Chroma, graph JSON, summaries, and Obsidian notes are rebuildable derived artifacts.
 
-## `metadata`
+## 🏷️ `metadata`
 
 Global key/value metadata.
 
@@ -35,7 +35,7 @@ Typical keys:
 - `export_version`
 - `graph_excluded_paths`
 
-## `files`
+## 📁 `files`
 
 Main file/folder table.
 
@@ -99,7 +99,7 @@ Example `document_metadata_json` for YOLO:
 }
 ```
 
-## `stages`
+## 🧱 `stages`
 
 Tracks resumable work per file.
 
@@ -133,7 +133,7 @@ Stage statuses:
 - `complete`
 - `failed`
 
-## `relationships`
+## 🔗 `relationships`
 
 Evidence-backed links between files.
 
@@ -159,7 +159,7 @@ Relationship examples:
 - `content`
 - semantic relationship types returned by the local generation model
 
-## `files_fts`
+## 🔎 `files_fts`
 
 SQLite full-text search index.
 
@@ -180,7 +180,7 @@ Search covers:
 - YOLO analysis text
 - summary JSON
 
-## `action_plans`
+## 📝 `action_plans`
 
 Stores proposed file operations.
 
@@ -198,7 +198,7 @@ CREATE TABLE action_plans (
 
 Agents can propose actions, but applying changes is a separate approval step.
 
-## `action_audit`
+## 📋 `action_audit`
 
 Audit history for action plans.
 
@@ -212,7 +212,7 @@ CREATE TABLE action_audit (
 );
 ```
 
-## Data Ownership
+## 🗄️ Data Ownership
 
 | Artifact | Owner | Rebuildable? |
 |---|---|---|
