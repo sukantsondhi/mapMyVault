@@ -1,0 +1,1 @@
+"""mapMyVault tests."""

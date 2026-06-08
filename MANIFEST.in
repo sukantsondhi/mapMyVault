@@ -1,0 +1,6 @@
+include LICENSE
+include README.md
+include requirements.txt
+include requirements-vision.txt
+recursive-include models .gitkeep
+recursive-include docs *.md
