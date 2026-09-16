@@ -17,17 +17,21 @@ The detailed pipeline is also documented in [Architecture](docs/ARCHITECTURE.md)
 | Local LLM support | Uses local Ollama models for summaries, relationship judgment, embeddings, and chat |
 | OCR | Optional Tesseract OCR for scanned PDFs and image text |
 | Image vision | Optional YOLO labels for local image files |
-| Streamlit UI | Chat, Knowledge indexing, and Graph View management |
+| Streamlit UI | Chat, Knowledge indexing, searchable Explorer, and evidence-backed connections |
 | Obsidian export | Writes mirrored Markdown notes under `obsidian/` |
 | MCP tools | Lets local clients such as Open WebUI/MCPO/OpenClaw query the index |
 
 ## 🖥️ Streamlit UI
 
-![Chat Window](./docs/assets/Chat-Window.png)
-![Knowledge Window 1](./docs/assets/Knowledge-Window-1.png)
-![Knowledge Window 2](./docs/assets/Knowledge-Window-2.png)
-![Graph View Window](./docs/assets/GraphView-Window.png)
+Studio uses one **Active index** in the sidebar across all views. Switching indexes
+clears the previous conversation and attachments and stops its session-owned MCP
+server. Chat includes persistent evidence panels, current-message image attachments,
+and exact local counts even when there are zero matches.
 
+- **Knowledge / Build index**: source selection, local models, optional OCR and YOLO.
+- **Knowledge / Export & connect**: Obsidian export and local MCP controls.
+- **Explorer / Files**: filter, preview, navigate, and manage index exclusions.
+- **Explorer / Connections**: up to 80 recorded relationships with confidence and explanations.
 
 ## 📦 Output Layout
 
@@ -88,14 +92,19 @@ Full setup guide: [docs/SETUP.md](docs/SETUP.md)
 
 1. Open `Knowledge`.
 2. Choose the source folder you want to index.
-3. Choose an output/index folder outside the source folder.
-4. Select which top-level folders/files should be indexed.
+3. Set **Active index / Index folder** to an output folder outside the source folder.
+4. Open **Source contents** and choose any folders/files to exclude.
 5. Choose the embedding model. Existing indexes keep their original embedding model.
 6. Enable OCR if you have scanned PDFs or images with text.
 7. Optional: enable YOLO if you have image files where object labels are useful.
-8. Click `Generate / Update Local LLM Index`.
+8. Click `Build index` or `Update index`.
 9. Open `Chat` and ask questions against the local index.
-10. Generate the Obsidian view only when you want readable Markdown notes.
+10. Use **Export & connect / Export vault** for readable Obsidian notes.
+
+Explorer's **Remove from index** leaves source files untouched. Removed paths stay
+excluded until restored under **Excluded paths**. **Folder actions / Delete from disk**
+is separate and requires both a checkbox and the folder name. Explorer updates retain
+the saved OCR and vision settings; change them in Knowledge when needed.
 
 Index first, Obsidian second:
 

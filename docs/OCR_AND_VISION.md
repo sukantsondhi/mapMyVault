@@ -16,8 +16,28 @@ OCR runs only when enabled.
 For PDFs:
 
 ```text
-PDF -> pypdf text extraction -> if no text and OCR enabled -> render pages -> Tesseract OCR
+PDF -> pypdf text per page -> pages without text or with images -> render selected pages -> Tesseract OCR
+                         -> merge native and recognized text in page order
 ```
+
+With OCR enabled, mixed PDFs retain native text and recognize scanned pages,
+including images containing text on a page that also has native text. OCR renders
+the entire candidate page. Recognized lines matching native lines after whitespace
+and case normalization are omitted; other recognized lines are appended to that
+page's native text. This does not reconstruct the original page layout. Native
+text is retained if OCR fails, with the failure recorded in `ocr_status`.
+
+`ocr_max_pages` defaults to 10 and applies to the first 10 pages of the original
+PDF, not the first 10 OCR candidates. Set it to 0 to remove the page limit. Native
+text outside that range is still extracted until the content character limit.
+`ocr_candidate_pages` lists detected candidates using one-based page numbers;
+`ocr_skipped_pages` lists candidates excluded by the page limit. Candidate discovery
+also stops when the native-text character budget is reached. `ocr_pages` counts
+pages actually processed by Tesseract, which can be fewer than rendered pages when
+the character limit is reached. Files over the configured byte limit are not read.
+
+Rerunning an existing index refreshes pre-fix extraction caches so mixed PDFs are
+not left with their old native-text-only results.
 
 For image files:
 
@@ -47,6 +67,7 @@ Common OCR statuses:
 | `ocr_required`    | PDF/image probably needs OCR but OCR was disabled | Enable OCR and rerun                           |
 | `ocr_extracted`   | OCR worked and produced text                      | Nothing                                        |
 | `ocr_empty`       | OCR ran but found no text                         | Usually fine for photos                        |
+| `ocr_skipped`     | All detected PDF candidates exceed the page limit | Raise `ocr_max_pages` if needed                |
 | `ocr_failed`      | OCR ran but failed on that file                   | Check file and logs                            |
 | `ocr_unavailable` | OCR tool is missing                               | Install Tesseract/Poppler and restart terminal |
 
@@ -66,6 +87,41 @@ python -c "import fitz; print('PyMuPDF OK')"
 ```
 
 If `tesseract --version` fails, OCR cannot run. Add Tesseract to PATH or reinstall it.
+
+For an existing installation in the usual Windows location, this enables it only
+for the current PowerShell session and programs started from that session:
+
+```powershell
+$env:Path = "C:\Program Files\Tesseract-OCR;" + $env:Path
+tesseract --list-langs
+```
+
+Start or restart Studio from that terminal so it inherits the updated PATH. The
+English recognition tests require `eng` in the installed language list.
+
+## Recognition Tests
+
+With the project dependencies installed and the virtual environment activated:
+
+```powershell
+python -m unittest tests.test_mapper.TextRecognitionTests tests.test_mapper.LiveTextRecognitionTests -v
+```
+
+The tests generate temporary documents locally; no user files, downloads, model
+services, or external OCR providers are used. Live tests call the real Tesseract
+engine and skip explicitly if it is absent from PATH. A run with skipped live
+tests is not evidence that recognition works.
+
+Coverage includes UTF-8 text with a BOM, native PDFs without OCR, PNG/JPEG/BMP/WebP
+and single-frame TIFF images, scanned PDFs, mixed native/scanned pages in both
+orders, and native text plus an image on the same page. Tests also cover the
+PyMuPDF renderer fallback, page/character limits, blank and malformed images,
+missing engine/language errors, cache invalidation, and SQLite search persistence.
+Only LLM summarization and embeddings are faked in the indexing test.
+
+Recognition assertions use clear printed English text. Handwriting, rotated or
+noisy scans, multi-frame TIFFs, and non-English recognition quality are not covered.
+Embedded-image OCR inside DOCX, XLSX, or PPTX is not implemented.
 
 ## 🖼️ YOLO Pipeline
 

@@ -172,14 +172,15 @@ class IndexStore:
     def mark_path_tree_deleted(self, path: str) -> List[str]:
         """Soft-delete one indexed path and all indexed descendants."""
         normalized = path.strip("/")
+        prefix = f"{normalized}/"
         rows = list(
             self.connection.execute(
                 """
                 SELECT id,path FROM files
-                WHERE deleted=0 AND (path=? OR path LIKE ?)
+            WHERE deleted=0 AND (path=? OR substr(path,1,?)=?)
                 ORDER BY path
                 """,
-                (normalized, f"{normalized}/%"),
+            (normalized, len(prefix), prefix),
             )
         )
         removed = []

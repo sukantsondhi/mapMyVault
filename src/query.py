@@ -287,7 +287,8 @@ class VaultIndex:
                 "instruction": "A question is required. Ask the user for a question.",
             }
         count_result = self.count_matches(question, limit=max(limit, 50))
-        if _is_count_question(question) and count_result["paths"]:
+        is_count = _is_count_question(question)
+        if is_count:
             matches = [
                 self.get_file_summary(path)
                 for path in count_result["paths"][:limit]
@@ -296,7 +297,7 @@ class VaultIndex:
                 item["match_type"] = "count_match"
         else:
             matches = self.search_files(question, limit)
-        if count_result["count"] == 0 and matches:
+        if not is_count and count_result["count"] == 0 and matches:
             count_result = {
                 **count_result,
                 "count": len(matches),
@@ -349,7 +350,7 @@ class VaultIndex:
             item["path"] for item in evidence.get("results", [])
         ]
         found_count = evidence.get("found_count", len(paths))
-        if found_count == 0:
+        if found_count == 0 and not _is_count_question(question):
             return {
                 "question": question,
                 "answer": "No relevant indexed data was found in the local mapMyVault database.",

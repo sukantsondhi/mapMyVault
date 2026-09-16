@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -23,11 +24,79 @@ from src.storage import IndexStore
 from src.vector_index import VectorIndex
 
 
-st.set_page_config(page_title="mapMyVault Studio", layout="wide")
-
-MENU_ITEMS = ["Chat", "Knowledge", "Graph View"]
+MENU_ITEMS = ["Chat", "Knowledge", "Explorer"]
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 YOLO_MODELS_DIR = PROJECT_ROOT / "models"
+
+
+def _studio_style() -> None:
+    st.html("""
+        <style>
+        :root { --vault-ink: #242a2e; --vault-green: #15765d; --vault-line: #dce3e0; }
+        .stApp { background: #fcfcfc; color: var(--vault-ink); }
+        .stApp, .stApp input, .stApp textarea, .stApp button {
+            font-family: "Aptos", "Trebuchet MS", sans-serif; letter-spacing: 0;
+        }
+        h1, h2, h3 { font-family: "Bahnschrift", "Trebuchet MS", sans-serif !important;
+            font-weight: 600 !important; letter-spacing: 0 !important; }
+        h1 { font-size: 2rem !important; }
+        h2 { font-size: 1.35rem !important; }
+        h3 { font-size: 1.1rem !important; }
+        .stMainBlockContainer { max-width: 1180px; padding: 2.5rem 2.5rem 2rem; }
+        [data-testid="stSidebar"] { background: #f1f4f3; border-right: 1px solid var(--vault-line); }
+        [data-testid="stSidebar"] h1 { font-size: 1.7rem !important; }
+        [data-testid="stToolbar"] { pointer-events: none; }
+        [data-testid="stToolbar"] button { pointer-events: auto; }
+        [data-testid="stSidebar"] [data-testid="stButton"] button { justify-content: flex-start; }
+        [data-testid="stSidebar"] .st-key-vault_identity { padding: .5rem 0 1rem; }
+        .stApp button { border-radius: 6px !important; min-height: 2.5rem; }
+        [class*="st-key-browse_"] button p,
+        [class*="st-key-remove_chat_upload_"] button p {
+            position: absolute; width: 1px; height: 1px; overflow: hidden;
+            clip-path: inset(50%);
+        }
+        .stApp button[kind="primary"] { background: var(--vault-green); border-color: var(--vault-green); }
+        .stApp button:focus-visible { outline: 2px solid #a34c27; outline-offset: 3px; }
+        .stApp [data-testid="stMetric"] { border-bottom: 2px solid var(--vault-line); padding: .3rem 0 .8rem; }
+        .stApp [data-testid="stMetricValue"] { font-family: "Bahnschrift", sans-serif; font-size: 1.8rem; }
+        .stApp [data-testid="stMetricLabel"] { color: #55645e; }
+        .stApp [data-testid="stExpander"] details { border-radius: 6px; border-color: var(--vault-line); }
+        .stApp [data-testid="stChatMessage"] { border-radius: 6px; background: #f1f4f3; }
+        .st-key-chat_empty { padding: 3rem 1rem; margin: 1rem 0;
+            border-top: 1px solid var(--vault-line); border-bottom: 1px solid var(--vault-line);
+            background-image: radial-gradient(#dce3e0 .7px, transparent .7px);
+            background-size: 16px 16px; }
+        .st-key-chat_empty h3 { font-size: 1.5rem !important; }
+        .stApp [data-testid="stMarkdownContainer"] p,
+        .stApp [data-testid="stCaptionContainer"], .stApp button p {
+            overflow-wrap: anywhere; white-space: normal;
+        }
+        .stApp [data-testid="stTabs"] [role="tab"] { font-size: .95rem; }
+        .stApp [data-testid="stGraphVizChart"] svg { max-height: 420px; }
+        @media (max-width: 640px) {
+            .stMainBlockContainer { padding: 1.5rem 1rem 1rem; }
+            h1 { font-size: 1.7rem !important; }
+            .st-key-chat_empty { padding: 1.5rem .5rem; }
+            .st-key-index_summary [data-testid="stHorizontalBlock"] { flex-wrap: nowrap; gap: .75rem; }
+            .st-key-index_summary [data-testid="stColumn"] { min-width: 0 !important; flex: 1 1 0 !important; }
+            .st-key-index_summary [data-testid="stMetricLabel"] { min-height: 2.5rem; }
+        }
+        </style>
+    """)
+
+
+def _go_to(view: str) -> None:
+    st.session_state.view = view
+
+
+def _render_index_summary(output: Path) -> None:
+    status = _status(output)
+    with st.container(key="index_summary"):
+        for column, label, key in zip(
+            st.columns(3), ["Indexed files", "Folders", "Connections"],
+            ["files", "folders", "relationships"],
+        ):
+            column.metric(label, f"{status.get(key, 0):,}")
 
 
 def _session_default(key: str, value):
@@ -56,7 +125,43 @@ def _browse_into(key: str) -> None:
 
 
 def _sync_state(source_key: str, target_key: str) -> None:
-    st.session_state[target_key] = st.session_state.get(source_key, "")
+    value = st.session_state.get(source_key, "")
+    if target_key == "output_path":
+        _activate_output(value)
+    else:
+        st.session_state[target_key] = value
+
+
+def _clear_chat() -> None:
+    st.session_state.chat_history = []
+    st.session_state.chat_uploads = []
+    st.session_state.chat_upload_version = st.session_state.get("chat_upload_version", 0) + 1
+
+
+def _activate_output(value: str) -> None:
+    value = value.strip()
+    if value == st.session_state.get("output_path", ""):
+        return
+    _stop_mcp()
+    _clear_chat()
+    st.session_state.output_path = value
+    st.session_state.source_path = ""
+    st.session_state.graph_folder = ""
+    st.session_state.explorer_filter = ""
+    st.session_state.index_error = ""
+    for key in list(st.session_state):
+        if key.startswith(("graph_select_", "knowledge_include_", "source_exclusions_", "open_folder_")) or key in {
+            "chat_generation_model_select", "embedding_model_select"
+        }:
+            del st.session_state[key]
+    try:
+        output = _selected_output()
+        config = _config_from_manifest(output) if output and _index_exists(output) else MapperConfig()
+        for key in ("generation_model", "embedding_model", "enable_ocr", "ocr_language", "ocr_max_pages",
+                    "enable_vision", "vision_model", "vision_confidence", "vision_max_detections"):
+            st.session_state[key] = getattr(config, key)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        st.session_state.index_error = str(exc)
 
 
 def _prepare_synced_input(widget_key: str, source_key: str) -> None:
@@ -68,7 +173,7 @@ def _prepare_synced_input(widget_key: str, source_key: str) -> None:
 def _browse_synced_folder(widget_key: str, source_key: str) -> None:
     selected = _pick_folder(st.session_state.get(widget_key, ""))
     st.session_state[widget_key] = selected
-    st.session_state[source_key] = selected
+    _sync_state(widget_key, source_key)
 
 
 def _request_indexing() -> None:
@@ -172,13 +277,13 @@ def _ask_with_history(
         evidence = index.ask_mapmyvault(question, limit=30)
     finally:
         index.close()
-    if evidence.get("found_count", 0) == 0 and not images:
-        evidence["model_used"] = "none"
-        return evidence
     if _is_count_question(question):
         evidence["answer"] = deterministic_answer(evidence)
         evidence["deterministic"] = True
         evidence["model_used"] = "local deterministic count"
+        return evidence
+    if evidence.get("found_count", 0) == 0 and not images:
+        evidence["model_used"] = "none"
         return evidence
     ai = LocalAI("http://127.0.0.1:11434", generation_model, "nomic-embed-text:latest")
     try:
@@ -266,6 +371,7 @@ def _index_lock(output: Path):
 
 def _format_chat_answer(result: dict, generation_model: str) -> str:
     answer = result.get("answer", "No answer returned.")
+    model_used = result.get("model_used") or generation_model
     paths = result.get("paths", [])
     if paths:
         answer += "\n\nSources:\n" + "\n".join(f"- `{path}`" for path in paths[:20])
@@ -275,7 +381,7 @@ def _format_chat_answer(result: dict, generation_model: str) -> str:
             "was not used._"
         )
     elif result.get("model_used") and result["model_used"] != "none":
-        answer += f"\n\n_Model used: `{generation_model}`_"
+        answer += f"\n\n_Model used: `{model_used}`_"
     return answer
 
 
@@ -309,6 +415,7 @@ def _add_chat_uploads(files) -> None:
                 "data": data,
             }
         )
+        existing.add(key)
     st.session_state.chat_uploads = uploads
 
 
@@ -317,6 +424,7 @@ def _remove_chat_upload(index: int) -> None:
     if 0 <= index < len(uploads):
         uploads.pop(index)
     st.session_state.chat_uploads = uploads
+    st.session_state.chat_upload_version = st.session_state.get("chat_upload_version", 0) + 1
 
 
 def _chat_history_for_model() -> list[dict]:
@@ -474,12 +582,12 @@ def _exclude_patterns(paths: list[str]) -> list[str]:
     return patterns
 
 
-def _source_tree_items(source: Path, max_items: int = 300) -> list[dict]:
+def _source_tree_items(source: Path, max_items: int | None = None) -> list[dict]:
     if not source or not source.is_dir():
         return []
     items = []
     for item in sorted(source.iterdir(), key=lambda child: (not child.is_dir(), child.name.lower())):
-        if len(items) >= max_items:
+        if max_items is not None and len(items) >= max_items:
             break
         if item.name.startswith(".git"):
             continue
@@ -494,7 +602,11 @@ def _source_tree_items(source: Path, max_items: int = 300) -> list[dict]:
 
 
 def _include_key(path: str) -> str:
-    return f"knowledge_include_{path}"
+    return f"knowledge_include_{st.session_state.get('source_path', '')}_{path}"
+
+
+def _select_exclusions(key: str, paths: list[str]) -> None:
+    st.session_state[key] = paths
 
 
 def _render_source_selection(source: Path | None) -> list[str]:
@@ -503,46 +615,26 @@ def _render_source_selection(source: Path | None) -> list[str]:
     items = _source_tree_items(source)
     if not items:
         return []
-    st.subheader("Choose What To Index")
-    st.caption(
-        "Untick folders/files you do not want in the local index. Excluded items "
-        "are skipped before extraction, OCR, embeddings, and summaries."
+    paths = [item["path"] for item in items]
+    key = f"source_exclusions_{source}"
+    controls = st.columns(2)
+    controls[0].button("Include all", icon=":material/done_all:",
+                       on_click=_select_exclusions, args=(key, []))
+    controls[1].button("Exclude all", icon=":material/remove_done:",
+                       on_click=_select_exclusions, args=(key, paths))
+    excluded = st.multiselect(
+        "Excluded source items", paths,
+        default=[path for path in paths if not st.session_state.get(_include_key(path), True)],
+        key=key,
     )
-    control_cols = st.columns([0.18, 0.18, 0.64])
-    if control_cols[0].button("Select all", key="knowledge_select_all"):
-        for item in items:
-            st.session_state[_include_key(item["path"])] = True
-        st.rerun()
-    if control_cols[1].button("Select none", key="knowledge_select_none"):
-        for item in items:
-            st.session_state[_include_key(item["path"])] = False
-        st.rerun()
-
-    excluded = []
-    header_cols = st.columns([0.10, 0.08, 0.60, 0.22])
-    header_cols[0].caption("Index")
-    header_cols[1].caption("")
-    header_cols[2].caption("Top-level item")
-    header_cols[3].caption("Type")
-    for item in items:
-        st.session_state.setdefault(_include_key(item["path"]), True)
-        row_cols = st.columns([0.10, 0.08, 0.60, 0.22])
-        with row_cols[0]:
-            include = st.checkbox(
-                "Index item",
-                key=_include_key(item["path"]),
-                label_visibility="collapsed",
-            )
-        with row_cols[1]:
-            st.write("📁" if item["kind"] == "folder" else "📄")
-        row_cols[2].write(item["name"])
-        row_cols[3].caption(item["kind"])
-        if not include:
-            excluded.append(item["path"])
-    if excluded:
-        st.warning(f"{len(excluded)} top-level item(s) will be skipped.")
-    else:
-        st.caption("Everything shown here will be indexed.")
+    for path in paths:
+        st.session_state[_include_key(path)] = path not in excluded
+    st.dataframe(
+        [{"Item": item["name"], "Type": item["kind"],
+          "Index": "Excluded" if item["path"] in excluded else "Included"} for item in items],
+        hide_index=True, width="stretch", height=240,
+    )
+    st.caption(f"{len(items) - len(excluded)} included / {len(excluded)} excluded")
     return excluded
 
 
@@ -646,44 +738,19 @@ def _ensure_graph_folder_available(repository: Path, current: str) -> str:
 
 def _run_graph_update(repository: Path, output: Path) -> bool:
     st.session_state.indexing = True
-    with st.spinner("Updating only new, changed, moved, or deleted indexed work..."):
-        config = _graph_update_config(output)
-        if not _ensure_required_models(config):
-            st.session_state.indexing = False
-            return False
-        _run_index(repository, output, config)
-        return True
+    try:
+        with st.spinner("Updating the index..."):
+            config = _graph_update_config(output)
+            if not _ensure_required_models(config):
+                return False
+            _run_index(repository, output, config)
+            return True
+    finally:
+        st.session_state.indexing = False
 
 
 def _graph_update_config(output: Path) -> MapperConfig:
     config = _config_from_manifest(output)
-    config.enable_ocr = True
-    config.ocr_language = (
-        st.session_state.get("ocr_language")
-        or config.ocr_language
-        or "eng"
-    ).strip() or "eng"
-    config.ocr_max_pages = int(
-        st.session_state.get("ocr_max_pages")
-        or config.ocr_max_pages
-        or 10
-    )
-    config.enable_vision = bool(st.session_state.get("enable_vision", config.enable_vision))
-    config.vision_model = (
-        st.session_state.get("vision_model")
-        or config.vision_model
-        or "yolov8n.pt"
-    )
-    config.vision_confidence = float(
-        st.session_state.get("vision_confidence")
-        or config.vision_confidence
-        or 0.25
-    )
-    config.vision_max_detections = int(
-        st.session_state.get("vision_max_detections")
-        or config.vision_max_detections
-        or 50
-    )
     config.excludes = list(dict.fromkeys(config.excludes + _exclude_patterns(_index_excluded_paths(output))))
     return config
 
@@ -727,6 +794,20 @@ def _remove_index_subtrees(output: Path, relative_folders: list[str], persist_ex
     for folder in relative_folders:
         removed_total += _remove_index_subtree(output, folder, persist_exclusion)
     return removed_total
+
+
+def _restore_index_paths(output: Path, paths: list[str]) -> None:
+    with _index_lock(output):
+        excluded = _index_excluded_paths(output)
+        patterns = set(_exclude_patterns(paths))
+        manifest = _manifest(output)
+        config = manifest.get("config")
+        if config:
+            config["excludes"] = [pattern for pattern in config.get("excludes", []) if pattern not in patterns]
+            (output / "data" / "manifest.json").write_text(
+                json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        _set_index_excluded_paths(output, [path for path in excluded if path not in paths])
 
 
 def _unique_destination(folder: Path, name: str) -> Path:
@@ -789,8 +870,9 @@ def _run_index(source: Path, output: Path, config: MapperConfig) -> None:
             )
             result = mapper.map(export_vault_notes=False)
             progress.progress(1.0)
-            status.success("100% - Local LLM index is ready.")
-            st.json(result)
+            status.success("Index ready.")
+            with st.expander("Run details"):
+                st.json(result)
     finally:
         if mapper:
             mapper.close()
@@ -804,34 +886,46 @@ def _selected_output() -> Path | None:
 
 def _render_sidebar() -> None:
     with st.sidebar:
-        st.title("mapMyVault")
-        st.caption("Menu")
+        with st.container(key="vault_identity"):
+            st.title("mapMyVault")
+            st.caption("STUDIO / LOCAL WORKSPACE")
+        icons = {"Chat": ":material/chat_bubble_outline:", "Knowledge": ":material/database:", "Explorer": ":material/folder_open:"}
         for item in MENU_ITEMS:
             active = item == st.session_state.view
-            if st.button(
+            st.button(
                 item,
                 key=f"nav_{item}",
                 type="primary" if active else "secondary",
+                icon=icons[item],
                 use_container_width=True,
-                disabled=active,
-            ):
-                st.session_state.view = item
-                st.rerun()
+                on_click=_go_to,
+                args=(item,),
+                disabled=st.session_state.indexing,
+            )
         st.divider()
-        st.caption("Selected local index")
+        st.subheader("Active index")
+        _render_output_picker("Index folder", "active_output_path_input")
         output = _selected_output()
         if output and _index_exists(output):
-            st.success("Local index loaded")
+            st.success("Index connected", icon=":material/check_circle:")
+            st.caption(output.name)
         elif output:
-            st.warning("No index.sqlite found here yet")
-            st.caption(str(output))
+            st.warning("Index not built yet", icon=":material/info:")
         else:
-            st.info("Choose an output folder in Chat, Knowledge, or Graph View.")
+            st.caption("No index selected")
+        st.divider()
+        models = _available_ollama_models()
+        st.caption("LOCAL SERVICES")
+        st.write("Ollama connected" if models else "Ollama unavailable")
+        st.caption(f"{len(models)} installed models" if models else "127.0.0.1:11434")
+        if st.button("Refresh services", icon=":material/refresh:", use_container_width=True):
+            _available_ollama_models.clear()
+            st.rerun()
 
 
 def _render_output_picker(label: str, widget_key: str) -> str:
     _prepare_synced_input(widget_key, "output_path")
-    output_col, output_button_col = st.columns([0.84, 0.16])
+    output_col, output_button_col = st.columns([4, 1], vertical_alignment="bottom")
     with output_col:
         output_text = st.text_input(
             label,
@@ -839,72 +933,73 @@ def _render_output_picker(label: str, widget_key: str) -> str:
             placeholder=r"C:\path\to\mapmyvault-output",
             on_change=_sync_state,
             args=(widget_key, "output_path"),
+            disabled=st.session_state.indexing,
         )
     with output_button_col:
-        st.write("")
         st.button(
-            "Browse",
+            "Browse for index folder",
+            icon=":material/folder_open:",
+            help="Browse for index folder",
             key=f"browse_{widget_key}",
             on_click=_browse_synced_folder,
             args=(widget_key, "output_path"),
+            disabled=st.session_state.indexing,
         )
     return output_text
 
 
 def _render_chat() -> None:
     output = _selected_output()
-
+    ready = bool(output and _index_exists(output))
+    st.caption("WORKSPACE / CHAT")
     st.title("Chat")
-    st.caption("Answers come from the selected local mapMyVault index only.")
-    model_col, _spacer = st.columns([0.34, 0.66])
+    model_col, clear_col = st.columns([3, 1], vertical_alignment="bottom")
     with model_col:
         generation_model = _render_chat_model_control()
-    _render_output_picker("Index/output folder", "chat_output_path_input")
-    output = _selected_output()
-    if output:
-        st.caption(f"Using index: `{output}`")
-    else:
-        st.info("Choose an index/output folder in the sidebar or build one from Knowledge.")
-    st.info("Chat history is kept in memory for this app session and sent as context with each answer.")
+    with clear_col:
+        st.button("New chat", key="clear_chat_history", icon=":material/edit_square:",
+                  on_click=_clear_chat, use_container_width=True,
+                  disabled=not st.session_state.chat_history and not st.session_state.chat_uploads)
 
-    with st.expander("Upload local image(s) for a vision model", expanded=False):
-        if _is_vision_model(generation_model):
-            st.caption("Uploaded images are sent only to your selected local Ollama model for the next questions.")
-        else:
-            st.warning(
-                "The selected model does not look like a vision model. You can upload "
-                "images, but Ollama may reject them unless the model supports vision."
-            )
-        uploads = st.file_uploader(
-            "Upload image file(s)",
-            type=["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
-            accept_multiple_files=True,
-            key="chat_image_uploader",
-        )
-        if uploads:
-            _add_chat_uploads(uploads)
-        if st.session_state.chat_uploads:
-            st.write("Attached image(s)")
-            for index, item in enumerate(list(st.session_state.chat_uploads)):
-                cols = st.columns([0.72, 0.18, 0.10])
-                cols[0].caption(f"{item['name']} ({item['size']} bytes)")
-                cols[1].caption(item.get("type") or "image")
-                if cols[2].button("Remove", key=f"remove_chat_upload_{index}"):
-                    _remove_chat_upload(index)
-                    st.rerun()
-        else:
-            st.caption("No images attached.")
-
-    if st.button("Clear chat", key="clear_chat_history"):
-        st.session_state.chat_history = []
-        st.rerun()
+    if not st.session_state.chat_history:
+        with st.container(key="chat_empty"):
+            st.subheader("A new conversation" if ready else "No index connected")
+            if ready:
+                _render_index_summary(output)
+            else:
+                st.button("Set up an index", icon=":material/add:", type="primary",
+                          on_click=_go_to, args=("Knowledge",))
 
     for message in st.session_state.chat_history:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            if message.get("evidence"):
+                with st.expander("Local evidence"):
+                    st.json(message["evidence"])
 
-    question = st.chat_input("Ask the local knowledge base")
-    if not question:
+    with st.expander("Image attachments", icon=":material/attach_file:"):
+        if not _is_vision_model(generation_model):
+            st.caption("The selected model may not support images.")
+        uploads = st.file_uploader(
+            "Attach images",
+            type=["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
+            accept_multiple_files=True,
+            key=f"chat_image_uploader_{st.session_state.chat_upload_version}",
+            disabled=not ready,
+        )
+        if uploads:
+            _add_chat_uploads(uploads)
+        for position, item in enumerate(st.session_state.chat_uploads):
+            columns = st.columns([1, 4, 1], vertical_alignment="center")
+            columns[0].image(item["data"], width=56)
+            columns[1].caption(f"{item['name']} / {item['size']:,} bytes")
+            columns[2].button("Remove attachment", icon=":material/close:",
+                              help="Remove attachment",
+                              key=f"remove_chat_upload_{position}",
+                              on_click=_remove_chat_upload, args=(position,))
+
+    question = st.chat_input("Ask your local vault", disabled=not ready)
+    if not question or not question.strip():
         return
 
     image_payloads, image_names = _uploaded_chat_images()
@@ -918,19 +1013,21 @@ def _render_chat() -> None:
         st.markdown(user_content)
 
     with st.chat_message("assistant"):
-        answer, result = _generate_chat_answer(
-            output,
-            question,
-            history,
-            generation_model,
-            images=image_payloads,
-            image_names=image_names,
-        )
+        try:
+            answer, result = _generate_chat_answer(
+                output, question, history, generation_model,
+                images=image_payloads, image_names=image_names,
+            )
+        except Exception as exc:
+            answer, result = f"Unable to query this index: {exc}", None
         st.markdown(answer)
         if result:
-            with st.expander("Raw local evidence"):
+            with st.expander("Local evidence"):
                 st.json(result)
-    st.session_state.chat_history.append({"role": "assistant", "content": answer})
+    st.session_state.chat_history.append({"role": "assistant", "content": answer, "evidence": result})
+    st.session_state.chat_uploads = []
+    st.session_state.chat_upload_version += 1
+    st.rerun()
 
 
 def _model_value(models: list[str], key: str, preferred: str) -> str:
@@ -993,10 +1090,29 @@ def _render_embedding_model_control(locked_model: str | None = None) -> str:
 
 
 def _render_knowledge() -> None:
+    st.caption("WORKSPACE / KNOWLEDGE")
     st.title("Knowledge")
-    st.caption("Build or update the local LLM index. Existing valid work is reused.")
+    output = _selected_output()
+    if output and _index_exists(output):
+        _render_index_summary(output)
+    build_tab, integrations_tab = st.tabs(["Build index", "Export & connect"])
+    with build_tab:
+        _render_index_builder()
+    with integrations_tab:
+        _render_integrations()
 
-    source_col, source_button_col = st.columns([0.84, 0.16])
+
+def _render_index_builder() -> None:
+    selected_output = _selected_output()
+    existing_repository = (
+        _repository_from_index(selected_output)
+        if selected_output and _index_exists(selected_output)
+        else None
+    )
+    if not st.session_state.source_path and existing_repository:
+        st.session_state.source_path = str(existing_repository)
+    st.subheader("Source & models")
+    source_col, source_button_col = st.columns([8, 1], vertical_alignment="bottom")
     with source_col:
         source_text = st.text_input(
             "Source folder path",
@@ -1004,33 +1120,13 @@ def _render_knowledge() -> None:
             placeholder=r"C:\path\to\source",
         )
     with source_button_col:
-        st.write("")
-        st.button("Browse", key="browse_source", on_click=_browse_into, args=("source_path",))
+        st.button("Browse for source folder", icon=":material/folder_open:", help="Browse for source folder",
+                  key="browse_source", on_click=_browse_into, args=("source_path",))
 
-    _render_output_picker("Local index/output folder", "knowledge_output_path_input")
-    selected_output = _selected_output()
-    existing_repository = (
-        _repository_from_index(selected_output)
-        if selected_output and _index_exists(selected_output)
-        else None
-    )
     if selected_output and _index_exists(selected_output):
-        if existing_repository and existing_repository.is_dir():
-            st.info(
-                "Existing index found. Running Generate / Update will reuse completed "
-                f"work for `{existing_repository}` and add any non-indexed or changed "
-                "folders/files."
-            )
-            if not source_text:
-                source_text = str(existing_repository)
-                st.caption(
-                    "Source folder is empty, so mapMyVault will use the source recorded "
-                    "inside the existing index."
-                )
-        else:
+        if not existing_repository or not existing_repository.is_dir():
             st.warning(
-                "Existing index found, but its source folder is missing or not recorded. "
-                "Choose the source folder before updating so the manifest can be repaired."
+                "The original source folder is unavailable. Confirm its new location before updating."
             )
 
     source_for_selection = (
@@ -1038,87 +1134,64 @@ def _render_knowledge() -> None:
         if source_text
         else existing_repository
     )
-    selected_exclusions = _render_source_selection(source_for_selection)
+    with st.expander("Source contents", icon=":material/checklist:"):
+        selected_exclusions = _render_source_selection(source_for_selection)
+        if not source_for_selection or not source_for_selection.is_dir():
+            st.caption("No source folder selected")
 
-    st.subheader("Local Embeddings")
+    model_columns = st.columns(2)
     locked_embedding_model = _locked_embedding_model(selected_output)
-    embedding_model = _render_embedding_model_control(locked_embedding_model)
-    st.caption(
-        "The chat/summarizer model is selected from the top-left of the Chat page."
-    )
+    with model_columns[0]:
+        _render_chat_model_control()
+    with model_columns[1]:
+        embedding_model = _render_embedding_model_control(locked_embedding_model)
 
-    st.subheader("OCR")
-    enable_ocr = st.checkbox("Enable local OCR", key="enable_ocr")
-    ocr_language = st.text_input("Tesseract language", key="ocr_language")
-    ocr_max_pages = st.number_input(
-        "OCR max PDF pages",
-        min_value=1,
-        max_value=500,
-        key="ocr_max_pages",
-    )
-
-    st.subheader("Image Vision")
-    enable_vision = st.checkbox(
-        "Enable local YOLO object labels for image files",
-        key="enable_vision",
-    )
-    ultralytics_ready = _ultralytics_available()
-    if enable_vision and not ultralytics_ready:
-        st.error(
-            "`ultralytics` is not installed in this Python environment, so YOLO "
-            "cannot run yet."
+    with st.expander("Text recognition / OCR", icon=":material/document_scanner:"):
+        enable_ocr = st.toggle("Enable local OCR", key="enable_ocr")
+        ocr_columns = st.columns(2)
+        ocr_language = ocr_columns[0].text_input("Tesseract language", key="ocr_language", disabled=not enable_ocr)
+        ocr_max_pages = ocr_columns[1].number_input(
+            "OCR max PDF pages", min_value=1, max_value=500, key="ocr_max_pages", disabled=not enable_ocr,
         )
-        st.code("pip install -r requirements-vision.txt", language="powershell")
-    yolo_models = _available_yolo_models()
-    if yolo_models:
-        if st.session_state.vision_model not in yolo_models:
-            st.session_state.vision_model = yolo_models[0]
-        vision_model = st.selectbox(
-            "YOLO model from repo models folder",
-            yolo_models,
-            index=yolo_models.index(st.session_state.vision_model),
-            key="vision_model",
-            help=f"Files are loaded from {YOLO_MODELS_DIR}.",
-        )
-    else:
-        vision_model = ""
-        st.caption(f"YOLO models are loaded from `{YOLO_MODELS_DIR}`.")
-        if enable_vision:
-            st.warning(
-                "No YOLO `.pt` files found. Download a YOLO weights file into "
-                f"`{YOLO_MODELS_DIR}` and refresh this page."
-            )
-            st.code(
-                'Invoke-WebRequest -Uri "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt" -OutFile "models\\yolov8n.pt"',
-                language="powershell",
-            )
-    vision_confidence = st.slider(
-        "YOLO confidence threshold",
-        min_value=0.05,
-        max_value=0.95,
-        value=float(st.session_state.vision_confidence),
-        step=0.05,
-        key="vision_confidence",
-    )
-    vision_max_detections = st.number_input(
-        "YOLO max detections per image",
-        min_value=1,
-        max_value=500,
-        key="vision_max_detections",
-    )
 
-    st.subheader("Index")
-    st.write(
-        "This writes SQLite, Chroma, summaries, and graph data. Obsidian notes are "
-        "generated only when you click the Obsidian export button. If the output "
-        "folder already contains an index for the same source, this updates it "
-        "incrementally instead of reprocessing unchanged files."
-    )
+    with st.expander("Object detection / YOLO", icon=":material/image_search:"):
+        enable_vision = st.toggle("Enable local object detection", key="enable_vision")
+        ultralytics_ready = _ultralytics_available()
+        if enable_vision and not ultralytics_ready:
+            st.error("YOLO requires the optional vision dependencies.")
+            st.code("pip install -r requirements-vision.txt", language="powershell")
+        yolo_models = _available_yolo_models()
+        if yolo_models:
+            if st.session_state.vision_model not in yolo_models:
+                st.session_state.vision_model = yolo_models[0]
+            vision_model = st.selectbox(
+                "YOLO model", yolo_models, key="vision_model", disabled=not enable_vision,
+                help=f"Local weights in {YOLO_MODELS_DIR}",
+            )
+        else:
+            vision_model = ""
+            if enable_vision:
+                st.warning(f"No local YOLO weights found in {YOLO_MODELS_DIR}.")
+        vision_columns = st.columns(2)
+        vision_confidence = vision_columns[0].slider(
+            "Confidence threshold", min_value=0.05, max_value=0.95, step=0.05,
+            key="vision_confidence", disabled=not enable_vision,
+        )
+        vision_max_detections = vision_columns[1].number_input(
+            "Max detections per image", min_value=1, max_value=500,
+            key="vision_max_detections", disabled=not enable_vision,
+        )
+
+    st.divider()
+    if not selected_output:
+        st.info("No output folder selected.")
     st.button(
-        "Generate / Update Local LLM Index",
+        "Update index" if selected_output and _index_exists(selected_output) else "Build index",
+        icon=":material/sync:",
         type="primary",
-        disabled=st.session_state.indexing,
+        disabled=st.session_state.indexing or not source_text or not selected_output,
         on_click=_request_indexing,
+        key="build_index",
     )
     if st.session_state.indexing:
         st.info("Index generation is already running. Please wait.")
@@ -1176,23 +1249,15 @@ def _render_knowledge() -> None:
                 st.error(str(exc))
                 st.session_state.indexing = False
 
-    output = _selected_output()
-    if output and _index_exists(output):
-        st.subheader("Indexed Folder View")
-        with st.expander("Show indexed files and folders", expanded=True):
-            st.code("\n".join(_tree_lines(output)) or "No indexed files.", language="text")
-        with st.expander("Index status"):
-            st.json(_status(output))
-    else:
-        st.info("Load or generate a local index to see the folder tree.")
 
-    st.subheader("Obsidian")
+def _render_integrations() -> None:
+    output = _selected_output()
+    ready = bool(output and _index_exists(output))
+    st.subheader("Obsidian export")
     vault_path = output / "obsidian" if output else None
     if vault_path:
-        st.caption(f"Obsidian notes will be saved to `{vault_path}`.")
-    else:
-        st.caption("Choose an output folder first.")
-    if st.button("Generate Obsidian Graph / Vault"):
+        st.caption(str(vault_path))
+    if st.button("Export vault", icon=":material/ios_share:", disabled=not ready):
         if not output or not _index_exists(output):
             st.error("Generate or load a local index first.")
         else:
@@ -1203,24 +1268,35 @@ def _render_knowledge() -> None:
                 except Exception as exc:
                     st.error(str(exc))
 
-    st.subheader("MCP For External Local Clients")
-    mcp_port = st.number_input("MCP port", min_value=1024, max_value=65535, value=8765)
+    st.divider()
+    st.subheader("MCP server")
     process = st.session_state.get("mcp_process")
     running = process is not None and process.poll() is None
-    st.caption("Internal chat uses Python directly. MCP is only needed for Open WebUI/OpenClaw.")
+    mcp_port = st.number_input("MCP port", min_value=1024, max_value=65535, value=8765, disabled=running)
+    st.caption("Running" if running else "Stopped")
+    if running:
+        st.code(f"http://127.0.0.1:{mcp_port}/mcp", language="text")
     col_a, col_b = st.columns(2)
     with col_a:
-        if st.button("Start MCP", disabled=not output or not _index_exists(output)):
+        if st.button("Start MCP", icon=":material/play_arrow:", disabled=not ready or running):
             _start_mcp(output, int(mcp_port))
-            st.success(f"MCP running at http://127.0.0.1:{mcp_port}/mcp")
+            st.rerun()
     with col_b:
-        if st.button("Stop MCP", disabled=not running):
+        if st.button("Stop MCP", icon=":material/stop:", disabled=not running):
             _stop_mcp()
-            st.info("MCP stopped.")
+            st.rerun()
 
 
 def _set_graph_folder(path: str) -> None:
     st.session_state.graph_folder = path
+    st.session_state.reset_explorer_filter = True
+
+
+def _open_graph_folder(widget_key: str) -> None:
+    folder = st.session_state.get(widget_key, "")
+    if folder:
+        _set_graph_folder(folder)
+    st.session_state[widget_key] = ""
 
 
 def _render_breadcrumbs(current: str) -> None:
@@ -1316,158 +1392,154 @@ def _item_status(item: dict) -> str:
 
 
 def _render_graph_view() -> None:
-    st.title("Graph View")
-    st.caption(
-        "Browse the existing indexed source tree, add local files or folders, then "
-        "incrementally update the KB."
-    )
-
-    _render_output_picker("Existing index/output folder", "graph_output_path_input")
-
+    st.caption("WORKSPACE / EXPLORER")
+    st.title("Explorer")
     output = _selected_output()
     if not output or not _index_exists(output):
-        st.info("Choose an existing mapMyVault output folder in the sidebar first.")
+        st.info("No index connected.")
+        st.button("Set up an index", icon=":material/add:", on_click=_go_to, args=("Knowledge",))
         return
 
+    _render_index_summary(output)
+    files_tab, connections_tab = st.tabs(["Files", "Connections"])
+    with connections_tab:
+        _render_connections(output)
+    with files_tab:
+        _render_file_explorer(output)
+
+
+def _render_connections(output: Path) -> None:
+    store = IndexStore(output / "data" / "index.sqlite")
+    try:
+        relationships = [dict(row) for row in store.connection.execute(
+            "SELECT source.path source, target.path target, relation.type, "
+            "relation.confidence, relation.explanation "
+            "FROM relationships relation "
+            "JOIN files source ON source.id=relation.source_id "
+            "JOIN files target ON target.id=relation.target_id "
+            "WHERE source.deleted=0 AND target.deleted=0 "
+            "ORDER BY relation.confidence DESC, source.path, target.path LIMIT 80"
+        )]
+    finally:
+        store.close()
+    if not relationships:
+        st.info("No connections recorded in this index.")
+        return
+    st.caption("Up to 80 highest-confidence connections")
+    paths = sorted({row[key] for row in relationships for key in ("source", "target")})
+    nodes = [
+        f'{json.dumps(path)} [label={json.dumps(Path(path).name)}, tooltip={json.dumps(path)}];'
+        for path in paths
+    ]
+    edges = [
+        f'{json.dumps(row["source"])} -> {json.dumps(row["target"])};'
+        for row in relationships
+    ]
+    st.graphviz_chart(
+        'digraph { graph [rankdir=LR, bgcolor="transparent", pad="0.2"]; '
+        'node [shape=box, style="rounded,filled", fillcolor="#e7f1ec", '
+        'color="#6e9e87", fontname="Helvetica", fontsize=11]; '
+        'edge [color="#7297a5", arrowsize=0.5]; '
+        + "\n".join(nodes + edges) + "}",
+        width="stretch",
+    )
+    st.dataframe(relationships, hide_index=True, width="stretch",
+                 column_config={"confidence": st.column_config.ProgressColumn("Confidence", min_value=0, max_value=1)})
+
+
+def _render_file_explorer(output: Path) -> None:
     repository = _repository_from_index(output)
     if not repository or not repository.is_dir():
         _render_graph_source_repair(output, repository)
         return
 
     current = _ensure_graph_folder_available(repository, st.session_state.graph_folder)
-    children = _combined_children(output, repository, current)
-    folders = [item for item in children if item["kind"] == "folder"]
-    files = [item for item in children if item["kind"] == "file"]
+    items = _combined_children(output, repository, current)
     target_dir = _safe_target_dir(repository, current)
-    items = folders + files
-    selected_paths = _selected_item_paths(items)
-    locked_embedding_model = _locked_embedding_model(output)
+    st.caption(str(repository / current))
+    toolbar = st.columns(2)
+    toolbar[0].button("Parent folder", icon=":material/arrow_upward:", key="graph_back", disabled=not current,
+                      on_click=_set_graph_folder, args=(_parent_folder(current),))
+    if toolbar[1].button("Update index", icon=":material/sync:", type="primary",
+                         disabled=st.session_state.indexing, key="graph_update_toolbar"):
+        try:
+            if _run_graph_update(repository, output):
+                st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+    folders = [item["path"] for item in items if item["kind"] == "folder" and item.get("exists")]
+    if folders:
+        folder_key = f"open_folder_{output}_{current}"
+        st.selectbox("Open folder", [""] + folders,
+                     format_func=lambda path: Path(path).name if path else "Select a folder",
+                     key=folder_key, on_change=_open_graph_folder, args=(folder_key,))
 
-    st.caption(f"Source root: `{repository}`")
-    if locked_embedding_model:
-        st.caption(f"Embedding model locked to this index: `{locked_embedding_model}`")
-        if locked_embedding_model not in _available_ollama_models():
-            st.warning("The locked embedding model is not installed locally.")
-            st.code(f"ollama pull {locked_embedding_model}", language="powershell")
+    search = st.text_input("Filter current folder", key="explorer_filter", placeholder="File or folder name")
+    visible = [item for item in items if search.casefold() in Path(item["path"]).name.casefold()]
+    selected_paths = []
+    if visible:
+        row_signature = hash(tuple(item["path"] for item in visible))
+        table = st.dataframe(
+            [{"Name": Path(item["path"]).name, "Type": item["kind"], "Status": _item_status(item)} for item in visible],
+            hide_index=True, width="stretch", height=320,
+            on_select="rerun", selection_mode="multi-row",
+            key=f"explorer_items_{output}_{current}_{search}_{row_signature}_{st.session_state.get('explorer_version', 0)}",
+        )
+        selected_paths = [visible[position]["path"] for position in table.selection.rows if position < len(visible)]
     else:
-        st.warning("No embedding model is locked to this index yet. Select one before updating.")
-        _render_embedding_model_control()
-
-    toolbar = st.columns([0.08, 0.30, 0.28, 0.16, 0.18])
-    with toolbar[0]:
-        if st.button("←", key="graph_back", disabled=not current):
-            _set_graph_folder(_parent_folder(current))
+        st.info("No matching items." if search else "This folder is empty.")
+    st.caption(f"{len(visible)} items / {len(selected_paths)} selected")
+    if st.button("Remove from index", icon=":material/remove_circle_outline:", key="graph_delete_selected",
+                 disabled=not selected_paths or st.session_state.indexing):
+        try:
+            removed = _remove_index_subtrees(output, selected_paths, persist_exclusion=True)
+            st.session_state.explorer_version = st.session_state.get("explorer_version", 0) + 1
+            st.session_state.notice = f"Removed {removed} indexed items. Source files were not deleted."
             st.rerun()
-    with toolbar[1]:
-        st.text_input(
-            "Folder name",
-            value=Path(current).name if current else repository.name,
-            disabled=True,
-            key=f"graph_current_name_{current}",
-        )
-    with toolbar[2]:
-        uploads = st.file_uploader(
-            "Upload file",
-            accept_multiple_files=True,
-            key=f"upload_{current}",
-        )
-    with toolbar[3]:
-        st.write("")
-        delete_clicked = st.button(
-            "Delete",
-            disabled=st.session_state.indexing or not selected_paths,
-            key="graph_delete_selected",
-            use_container_width=True,
-        )
-    with toolbar[4]:
-        st.write("")
-        update_clicked = st.button(
-            "Update KB",
-            type="primary",
-            disabled=st.session_state.indexing,
-            key="graph_update_toolbar",
-            use_container_width=True,
-        )
+        except Exception as exc:
+            st.error(str(exc))
 
-    if uploads:
-        if st.button("Save uploaded file(s) here", key=f"save_uploads_{current}"):
-            saved = []
+    if len(selected_paths) == 1:
+        index = VaultIndex(output)
+        try:
+            preview = index.get_file_summary(selected_paths[0])
+        finally:
+            index.close()
+        if preview:
+            with st.expander("File details", expanded=True):
+                st.write(preview.get("summary", {}).get("purpose", ""))
+                st.text(preview.get("excerpt") or "No extracted text.")
+
+    excluded = _index_excluded_paths(output)
+    if excluded:
+        with st.expander(f"Excluded paths ({len(excluded)})"):
+            restore = st.multiselect("Paths to allow again", excluded)
+            if st.button("Allow indexing again", icon=":material/restore:", disabled=not restore):
+                _restore_index_paths(output, restore)
+                st.session_state.notice = "Exclusions cleared. These paths will be included in the next index update."
+                st.rerun()
+
+    with st.expander("Add files", icon=":material/upload_file:"):
+        upload_key = f"upload_{output}_{current}_{st.session_state.get('graph_upload_version', 0)}"
+        uploads = st.file_uploader("Local files", accept_multiple_files=True, key=upload_key)
+        if st.button("Save files", icon=":material/save:", disabled=not uploads):
             try:
-                target_dir.mkdir(parents=True, exist_ok=True)
                 for upload in uploads:
                     destination = _unique_destination(target_dir, upload.name)
                     destination.write_bytes(upload.getbuffer())
-                    saved.append(destination.name)
-                st.success(f"Saved {len(saved)} file(s). Click Update KB to index them.")
-                st.write(saved)
+                st.session_state.graph_upload_version = st.session_state.get("graph_upload_version", 0) + 1
+                st.session_state.notice = f"Saved {len(uploads)} files. Index update pending."
+                st.rerun()
             except Exception as exc:
                 st.error(str(exc))
 
-    if delete_clicked:
-        try:
-            removed = _remove_index_subtrees(output, selected_paths, persist_exclusion=True)
-            _clear_item_selection(selected_paths)
-            st.success(
-                f"Deleted {len(selected_paths)} item(s) from this index "
-                f"and removed {removed} indexed item(s). Source files were not deleted."
-            )
-            st.rerun()
-        except Exception as exc:
-            st.error(str(exc))
+    with st.expander("Folder actions", icon=":material/create_new_folder:"):
+        _render_folder_actions(repository, output, current, target_dir)
 
-    if update_clicked:
-        try:
-            if _run_graph_update(repository, output):
-                st.success("KB updated from the graph view.")
-        except Exception as exc:
-            st.error(str(exc))
-            st.session_state.indexing = False
 
-    st.divider()
-    st.subheader(current or "Root")
-    st.caption("Select folders or files, open a folder, delete selected items from the index, or update the KB.")
-
-    if items:
-        header_cols = st.columns([0.08, 0.07, 0.55, 0.30])
-        header_cols[0].caption("Select")
-        header_cols[1].caption("")
-        header_cols[2].caption("Item")
-        header_cols[3].caption("Index status")
-        for item in items:
-            name = Path(item["path"]).name
-            row_cols = st.columns([0.08, 0.07, 0.55, 0.30])
-            with row_cols[0]:
-                st.checkbox(
-                    "Select item",
-                    key=_item_select_key(item["path"]),
-                    label_visibility="collapsed",
-                )
-            with row_cols[1]:
-                st.write("📁")
-            with row_cols[2]:
-                label = name
-                if not item.get("indexed", True):
-                    label += " (not indexed yet)"
-                elif not item.get("exists", True):
-                    label += " (missing on disk)"
-                if item["kind"] == "folder":
-                    if st.button(label, key=f"folder_{item['path']}", use_container_width=True):
-                        _set_graph_folder(item["path"])
-                        st.rerun()
-                else:
-                    st.write(label)
-            with row_cols[3]:
-                st.caption(_item_status(item))
-    else:
-        st.caption("No folders or files in this folder.")
-
+def _render_folder_actions(repository: Path, output: Path, current: str, target_dir: Path) -> None:
     if current:
-        st.divider()
-        st.subheader("Manage Selected Folder")
-        st.caption(
-            "Rename or delete the selected source folder, then update the KB. "
-            "The mapper reuses completed stages for everything else."
-        )
+        st.subheader("Rename folder")
 
         rename_col, rename_button_col = st.columns([0.72, 0.28])
         current_name = Path(current).name
@@ -1481,6 +1553,7 @@ def _render_graph_view() -> None:
             st.write("")
             rename_clicked = st.button(
                 "Rename + update KB",
+                icon=":material/drive_file_rename_outline:",
                 key=f"rename_button_{current}",
                 disabled=st.session_state.indexing,
             )
@@ -1506,7 +1579,8 @@ def _render_graph_view() -> None:
                 st.error(str(exc))
                 st.session_state.indexing = False
 
-        with st.expander("Delete this folder from source and index"):
+        with st.container():
+            st.subheader("Delete from disk")
             st.warning(
                 "This deletes the selected source folder from disk. The next KB update "
                 "marks its old index rows as deleted."
@@ -1523,6 +1597,7 @@ def _render_graph_view() -> None:
             delete_ready = confirm_delete and delete_text == current_name
             if st.button(
                 "Delete folder + update KB",
+                icon=":material/delete_forever:",
                 key=f"delete_button_{current}",
                 disabled=st.session_state.indexing or not delete_ready,
                 type="secondary",
@@ -1542,53 +1617,66 @@ def _render_graph_view() -> None:
                     st.session_state.indexing = False
 
     st.divider()
-    st.subheader("Create Folder Here")
-    st.caption(
-        "Create a local folder inside the current folder. Use the top Upload file "
-        "control to add files."
-    )
+    st.subheader("Create folder")
 
     new_folder = st.text_input("New folder name", key="graph_new_folder")
-    if st.button("Create folder"):
+    if st.button("Create folder", icon=":material/create_new_folder:", key="graph_create_folder"):
         try:
             folder_name = _valid_child_name(new_folder)
             folder_path = _safe_target_dir(target_dir, folder_name)
             folder_path.mkdir(parents=True, exist_ok=True)
-            st.session_state.graph_folder = _child_path(current, folder_name)
-            st.success(f"Created `{folder_path}`. Click Update KB to index it.")
+            _set_graph_folder(_child_path(current, folder_name))
+            st.session_state.notice = f"Created {folder_path}. Index update pending."
             st.rerun()
         except Exception as exc:
             st.error(str(exc))
 
 
-_session_default("mcp_process", None)
-_session_default("indexing", False)
-_session_default("index_requested", False)
-_session_default("graph_index_requested", False)
-_session_default("source_path", "")
-_session_default("output_path", "")
-_session_default("chat_output_path_input", "")
-_session_default("knowledge_output_path_input", "")
-_session_default("graph_output_path_input", "")
-_session_default("view", "Chat")
-_session_default("generation_model", "llama3.1:8b")
-_session_default("embedding_model", "nomic-embed-text:latest")
-_session_default("chat_history", [])
-_session_default("chat_uploads", [])
-_session_default("enable_ocr", True)
-_session_default("ocr_language", "eng")
-_session_default("ocr_max_pages", 10)
-_session_default("enable_vision", False)
-_session_default("vision_model", "yolov8n.pt")
-_session_default("vision_confidence", 0.25)
-_session_default("vision_max_detections", 50)
-_session_default("graph_folder", "")
+def main() -> None:
+    st.set_page_config(page_title="mapMyVault Studio", layout="wide")
+    _studio_style()
+    defaults = {
+        "mcp_process": None,
+        "indexing": False,
+        "index_requested": False,
+        "graph_index_requested": False,
+        "source_path": "",
+        "output_path": "",
+        "view": "Chat",
+        "generation_model": "llama3.1:8b",
+        "embedding_model": "nomic-embed-text:latest",
+        "chat_history": [],
+        "chat_uploads": [],
+        "chat_upload_version": 0,
+        "enable_ocr": False,
+        "ocr_language": "eng",
+        "ocr_max_pages": 10,
+        "enable_vision": False,
+        "vision_model": "yolov8n.pt",
+        "vision_confidence": 0.25,
+        "vision_max_detections": 50,
+        "graph_folder": "",
+    }
+    for key, value in defaults.items():
+        _session_default(key, value)
+    if st.session_state.pop("reset_explorer_filter", False):
+        st.session_state.explorer_filter = ""
+    _render_sidebar()
+    if st.session_state.get("notice"):
+        st.success(st.session_state.pop("notice"))
+    if st.session_state.get("index_error"):
+        st.error(f"Unable to open this index: {st.session_state.index_error}")
+        return
+    try:
+        if st.session_state.view == "Chat":
+            _render_chat()
+        elif st.session_state.view == "Knowledge":
+            _render_knowledge()
+        elif st.session_state.view == "Explorer":
+            _render_graph_view()
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        st.error(f"Unable to read this index: {exc}")
 
-_render_sidebar()
 
-if st.session_state.view == "Chat":
-    _render_chat()
-elif st.session_state.view == "Knowledge":
-    _render_knowledge()
-elif st.session_state.view == "Graph View":
-    _render_graph_view()
+if __name__ == "__main__":
+    main()

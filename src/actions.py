@@ -22,9 +22,11 @@ class ActionManager:
     def close(self) -> None:
         self.store.close()
 
-    def propose_moves(self, operations: List[Dict[str, str]]) -> Dict:
+    def _validate_operations(self, operations: List[Dict[str, str]]) -> List[str]:
         errors = []
-        normalized = []
+        paths = []
+        if not operations:
+            errors.append("An action plan must contain at least one move")
         for operation in operations:
             source = (self.repository / operation["source"]).resolve()
             destination = (self.repository / operation["destination"]).resolve()
@@ -32,20 +34,35 @@ class ActionManager:
                 errors.append("All action paths must remain inside the repository")
             elif not source.exists():
                 errors.append(f"Source does not exist: {operation['source']}")
-            elif destination.exists():
+            elif destination.exists() or (self.repository / operation["destination"]).is_symlink():
                 errors.append(f"Destination already exists: {operation['destination']}")
-            normalized.append(operation)
+            elif any(parent.exists() and not parent.is_dir() for parent in destination.parents):
+                errors.append(f"Destination parent is not a directory: {operation['destination']}")
+            paths.extend([source, destination])
+        for position, path in enumerate(paths):
+            if any(
+                path == other or path in other.parents or other in path.parents
+                for other in paths[:position]
+            ):
+                errors.append("Action paths must not overlap within a plan")
+                break
+        return errors
+
+    def propose_moves(self, operations: List[Dict[str, str]]) -> Dict:
+        errors = self._validate_operations(operations)
         plan_id = uuid.uuid4().hex
         validation = {"valid": not errors, "errors": errors}
         self.store.connection.execute(
             "INSERT INTO action_plans VALUES(?,?,?,?,NULL,NULL,?)",
-            (plan_id, "proposed", json.dumps(normalized), json.dumps(validation), utc_now()),
+            (plan_id, "proposed", json.dumps(operations), json.dumps(validation), utc_now()),
         )
         self.store.connection.commit()
         return {"id": plan_id, "status": "proposed", "validation": validation}
 
     def approve(self, plan_id: str) -> Dict:
         row = self._plan(plan_id)
+        if row["status"] != "proposed":
+            raise ValueError("Only a proposed action plan can be approved")
         validation = json.loads(row["validation_json"])
         if not validation["valid"]:
             raise ValueError("Invalid action plan cannot be approved")
@@ -61,8 +78,12 @@ class ActionManager:
         row = self._plan(plan_id)
         if row["status"] != "approved":
             raise ValueError("Action plan requires explicit approval")
+        operations = json.loads(row["operations_json"])
+        errors = self._validate_operations(operations)
+        if errors:
+            raise ValueError("Action plan is no longer valid: " + "; ".join(errors))
         applied = []
-        for operation in json.loads(row["operations_json"]):
+        for operation in operations:
             source = self.repository / operation["source"]
             destination = self.repository / operation["destination"]
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -80,19 +101,20 @@ class ActionManager:
         row = self._plan(plan_id)
         if row["status"] != "applied":
             raise ValueError("Only an applied action plan can be rolled back")
+        operations = [
+            {"source": operation["destination"], "destination": operation["source"]}
+            for operation in reversed(json.loads(row["operations_json"]))
+        ]
+        errors = self._validate_operations(operations)
+        if errors:
+            raise ValueError("Rollback blocked: " + "; ".join(errors))
         reversed_operations = []
-        for operation in reversed(json.loads(row["operations_json"])):
-            source = self.repository / operation["destination"]
-            destination = self.repository / operation["source"]
-            if not source.exists() or destination.exists():
-                raise ValueError(
-                    f"Rollback blocked for {operation['destination']} -> {operation['source']}"
-                )
+        for operation in operations:
+            source = self.repository / operation["source"]
+            destination = self.repository / operation["destination"]
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(destination))
-            reversed_operations.append(
-                {"source": operation["destination"], "destination": operation["source"]}
-            )
+            reversed_operations.append(operation)
         self.store.connection.execute(
             "UPDATE action_plans SET status='rolled_back' WHERE id=?", (plan_id,)
         )

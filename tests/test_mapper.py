@@ -1,4 +1,6 @@
 import json
+import io
+import shutil
 import sys
 import tempfile
 import types
@@ -80,6 +82,28 @@ class FakeVectorIndex:
 
 
 class RepositoryMapperTests(unittest.TestCase):
+    def test_mixed_pdf_preserves_native_and_scanned_text(self):
+        import fitz
+
+        with tempfile.TemporaryDirectory() as base:
+            path = Path(base) / "mixed.pdf"
+            with fitz.open() as scan:
+                scan.new_page().insert_text((72, 100), "SCANNED REFERENCE 4286", fontsize=24)
+                image = scan[0].get_pixmap().tobytes("png")
+            with fitz.open() as document:
+                document.new_page().insert_text((72, 100), "NATIVE REFERENCE 7391", fontsize=24)
+                page = document.new_page()
+                page.insert_image(page.rect, stream=image)
+                document.save(path)
+            with patch("src.analyzer._ocr_pdf_tesseract", return_value=(
+                "SCANNED REFERENCE 4286", {"extraction_status": "ocr_extracted", "ocr_pages": 1}
+            )) as ocr:
+                text, metadata = extract_content(path, 10_000_000, 24_000, enable_ocr=True)
+            self.assertIn("NATIVE REFERENCE 7391", text)
+            self.assertIn("SCANNED REFERENCE 4286", text)
+            self.assertEqual(metadata["page_count"], 2)
+            ocr.assert_called_once()
+
     def test_local_office_document_extractors_read_content_and_metadata(self):
         from docx import Document
         from openpyxl import Workbook
@@ -305,7 +329,7 @@ class RepositoryMapperTests(unittest.TestCase):
             )
             mapper.close()
 
-            self.assertEqual(first_metadata["extraction_status"], "unsupported")
+            self.assertEqual(first_metadata["extraction_status"], "ocr_required")
             self.assertEqual(second_metadata["extraction_status"], "ocr_failed")
 
     def test_mapper_warns_when_pdf_needs_ocr_but_ocr_is_disabled(self):
@@ -511,6 +535,27 @@ class RepositoryMapperTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_index_subtree_removal_treats_wildcards_literally(self):
+        with tempfile.TemporaryDirectory() as base:
+            repo = Path(base) / "repo"
+            output = Path(base) / "output"
+            for folder in ("old_%", "old_Xstuff"):
+                (repo / folder).mkdir(parents=True)
+                (repo / folder / "file.txt").write_text(folder, encoding="utf-8")
+            mapper = RepositoryMapper(repo, output, ai=FakeAI(), use_chroma=False)
+            try:
+                mapper.map(export_vault_notes=False)
+            finally:
+                mapper.close()
+            store = IndexStore(output / "data" / "index.sqlite")
+            try:
+                removed = store.mark_path_tree_deleted("old_%")
+                self.assertEqual(len(removed), 2)
+                self.assertIsNone(store.get_file_by_path("old_%/file.txt"))
+                self.assertIsNotNone(store.get_file_by_path("old_Xstuff/file.txt"))
+            finally:
+                store.close()
+
     def test_file_progress_callback_reports_current_paths(self):
         with tempfile.TemporaryDirectory() as base:
             base = Path(base)
@@ -603,6 +648,12 @@ class RepositoryMapperTests(unittest.TestCase):
                 result = index.ask_mapmyvault(
                     "how many uni offers does sukant has for undergraduate degrees"
                 )
+                with patch.object(index, "search_files") as search:
+                    empty_result = index.ask_mapmyvault("how many zzznonexistent?")
+                search.assert_not_called()
+                self.assertEqual(empty_result["found_count"], 0)
+                self.assertEqual(empty_result["paths"], [])
+                self.assertIn("0 matching files", empty_result["answer"])
             finally:
                 index.close()
 
@@ -762,6 +813,255 @@ class RepositoryMapperTests(unittest.TestCase):
 
             self.assertEqual(text, "")
             self.assertEqual(metadata["ocr_language"], "eng")
+
+
+class TextRecognitionFixture(unittest.TestCase):
+    native_marker = "NATIVE REFERENCE 7391"
+    scanned_marker = "SCANNED REFERENCE 4286"
+
+    def setUp(self):
+        import fitz
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        with fitz.open() as document:
+            page = document.new_page(width=600, height=200)
+            page.insert_text((30, 65), self.scanned_marker, fontsize=26)
+            page.insert_text((30, 115), "Invoice total 1250", fontsize=24)
+            self.scan_bytes = page.get_pixmap(matrix=fitz.Matrix(2, 2)).tobytes("png")
+
+    def _make_pdf(self, name, layouts):
+        import fitz
+
+        path = self.base / name
+        with fitz.open() as document:
+            for native, scanned in layouts:
+                page = document.new_page(width=612, height=792)
+                if native:
+                    page.insert_text((36, 65), self.native_marker, fontsize=22)
+                if scanned:
+                    page.insert_image(fitz.Rect(36, 120, 576, 300), stream=self.scan_bytes)
+            document.set_metadata({"title": "Recognition fixture", "author": "Test suite"})
+            document.save(path)
+        return path
+
+    def _extract(self, path, **options):
+        return extract_content(path, 10_000_000, options.pop("max_chars", 24_000), **options)
+
+    def _assert_recognized(self, text, marker):
+        self.assertIn(marker, " ".join(text.upper().split()))
+
+
+class TextRecognitionTests(TextRecognitionFixture):
+    def test_text_files_and_native_pdf_do_not_call_ocr(self):
+        plain = self.base / "plain.txt"
+        plain.write_text("PLAINTEXT REFERENCE 3815", encoding="utf-8-sig")
+        native = self._make_pdf("native.pdf", [(True, False)])
+        with patch("pytesseract.image_to_string", side_effect=AssertionError("OCR was not needed")):
+            for path, marker in ((plain, "PLAINTEXT REFERENCE 3815"), (native, self.native_marker)):
+                with self.subTest(path=path.name):
+                    text, metadata = self._extract(path, enable_ocr=True)
+                    self._assert_recognized(text, marker)
+                    self.assertEqual(metadata["extraction_status"], "extracted")
+                    self.assertEqual(metadata["extracted_characters"], len(text))
+
+    def test_disabled_ocr_retains_native_text_and_reports_scanned_pages(self):
+        path = self._make_pdf("mixed.pdf", [(True, False), (False, True)])
+        with patch("pytesseract.image_to_string", side_effect=AssertionError("OCR is disabled")):
+            text, metadata = self._extract(path)
+        self._assert_recognized(text, self.native_marker)
+        self.assertNotIn(self.scanned_marker, text)
+        self.assertEqual(metadata["ocr_status"], "ocr_required")
+        self.assertEqual(metadata["ocr_candidate_pages"], [2])
+
+    def test_missing_engine_keeps_native_text(self):
+        path = self._make_pdf("mixed.pdf", [(True, True)])
+        with patch("src.analyzer.shutil.which", return_value=None):
+            text, metadata = self._extract(path, enable_ocr=True)
+        self._assert_recognized(text, self.native_marker)
+        self.assertEqual(metadata["ocr_status"], "ocr_unavailable")
+
+    def test_disabled_image_ocr_is_reported_as_required(self):
+        path = self.base / "image.png"
+        path.write_bytes(self.scan_bytes)
+        text, metadata = self._extract(path)
+        self.assertEqual(text, "")
+        self.assertEqual(metadata["extraction_status"], "ocr_required")
+
+    def test_native_pdf_character_limit_stops_page_extraction(self):
+        path = self._make_pdf("native-limit.pdf", [(True, False), (True, False)])
+        with patch("pypdf._page.PageObject.extract_text", side_effect=[
+            self.native_marker, AssertionError("Character limit already reached")
+        ]) as native:
+            text, metadata = self._extract(path, max_chars=10, enable_ocr=True)
+        native.assert_called_once()
+        self.assertEqual(len(text), 10)
+        self.assertTrue(metadata["truncated"])
+
+    def test_ocr_page_limit_can_exclude_all_scanned_pages(self):
+        path = self._make_pdf("page-limit.pdf", [(True, False), (False, True)])
+        with patch("src.analyzer._ocr_pdf_tesseract", side_effect=AssertionError("Page outside OCR limit")):
+            text, metadata = self._extract(path, enable_ocr=True, ocr_max_pages=1)
+        self._assert_recognized(text, self.native_marker)
+        self.assertEqual(metadata["ocr_pages"], 0)
+        self.assertEqual(metadata["ocr_skipped_pages"], [2])
+        self.assertEqual(metadata["ocr_status"], "ocr_skipped")
+
+    def test_same_page_ocr_does_not_duplicate_native_lines(self):
+        path = self._make_pdf("same-page.pdf", [(True, True)])
+        with patch("src.analyzer._ocr_pdf_tesseract", return_value=("", {
+            "extraction_status": "ocr_extracted",
+            "ocr_page_texts": {1: "native   reference 7391\n" + self.scanned_marker},
+        })):
+            text, metadata = self._extract(path, enable_ocr=True)
+        self.assertEqual(text, self.native_marker + "\n" + self.scanned_marker)
+        self.assertNotIn("ocr_page_texts", metadata)
+
+    def test_old_ocr_version_refreshes_cached_mixed_pdf(self):
+        repository = self.base / "source"
+        repository.mkdir()
+        self._make_pdf("source/mixed.pdf", [(True, False), (False, True)])
+        config = MapperConfig(enable_ocr=True)
+        ai = FakeAI()
+        mapper = RepositoryMapper(repository, self.base / "output", config, ai=ai, use_chroma=False)
+        try:
+            with patch("src.mapper.extract_content", return_value=(
+                self.native_marker, {"format": "pdf", "extraction_status": "extracted"}
+            )):
+                mapper.map(export_vault_notes=False)
+            first_calls = ai.summary_calls
+            mapper.store.set_metadata("ocr_version", (
+                f"{config.ocr_engine}:{config.ocr_language}:"
+                f"{config.ocr_dpi}:{config.ocr_max_pages}:{config.enable_ocr}"
+            ))
+            mapper.store.connection.commit()
+            with patch("src.analyzer._ocr_pdf_tesseract", return_value=(self.scanned_marker, {
+                "extraction_status": "ocr_extracted",
+                "ocr_pages": 1,
+                "ocr_page_texts": {2: self.scanned_marker},
+            })) as ocr:
+                mapper.map(export_vault_notes=False)
+            ocr.assert_called_once()
+            self.assertGreater(ai.summary_calls, first_calls)
+            text = mapper.store.get_file_by_path("mixed.pdf")["extracted_text"]
+            self._assert_recognized(text, self.native_marker)
+            self._assert_recognized(text, self.scanned_marker)
+        finally:
+            mapper.close()
+
+
+@unittest.skipUnless(shutil.which("tesseract"), "Live OCR requires Tesseract on PATH with English language data")
+class LiveTextRecognitionTests(TextRecognitionFixture):
+    def test_real_image_ocr_for_supported_formats(self):
+        from PIL import Image
+
+        for suffix in ("png", "jpg", "tiff", "bmp", "webp"):
+            with self.subTest(format=suffix):
+                path = self.base / f"image.{suffix}"
+                with Image.open(io.BytesIO(self.scan_bytes)) as image:
+                    image.convert("RGB").save(path)
+                text, metadata = self._extract(path, enable_ocr=True)
+                self._assert_recognized(text, self.scanned_marker)
+                self._assert_recognized(text, "INVOICE TOTAL 1250")
+                self.assertEqual(metadata["ocr_status"], "ocr_extracted")
+                self.assertEqual(metadata["extracted_characters"], len(text))
+
+    def test_real_scanned_pdf_ocr(self):
+        path = self._make_pdf("scan.pdf", [(False, True)])
+        text, metadata = self._extract(path, enable_ocr=True)
+        self._assert_recognized(text, self.scanned_marker)
+        self.assertEqual(metadata["extraction_status"], "ocr_extracted")
+        self.assertEqual(metadata["ocr_pages"], 1)
+        self.assertEqual(metadata["title"], "Recognition fixture")
+
+    def test_real_mixed_pdf_pages_preserve_order(self):
+        for layouts in ([(True, False), (False, True)], [(False, True), (True, False)]):
+            with self.subTest(layouts=layouts):
+                path = self._make_pdf("mixed.pdf", layouts)
+                text, metadata = self._extract(path, enable_ocr=True)
+                self._assert_recognized(text, self.native_marker)
+                self._assert_recognized(text, self.scanned_marker)
+                first, second = (self.native_marker, self.scanned_marker) if layouts[0][0] else (self.scanned_marker, self.native_marker)
+                self.assertLess(text.index(first), text.index(second))
+                self.assertEqual(metadata["ocr_pages"], 1)
+
+    def test_real_same_page_native_text_and_image_text(self):
+        path = self._make_pdf("same-page.pdf", [(True, True)])
+        text, metadata = self._extract(path, enable_ocr=True)
+        self._assert_recognized(text, self.native_marker)
+        self._assert_recognized(text, self.scanned_marker)
+        self.assertEqual(text.count(self.native_marker), 1)
+        self.assertEqual(metadata["ocr_pages"], 1)
+
+    def test_real_pdf_renderer_fallback(self):
+        path = self._make_pdf("fallback.pdf", [(False, True)])
+        with patch("src.analyzer._pdf_images_with_pdf2image", side_effect=RuntimeError("No Poppler")):
+            text, metadata = self._extract(path, enable_ocr=True)
+        self._assert_recognized(text, self.scanned_marker)
+        self.assertEqual(metadata["ocr_pdf_renderer"], "pymupdf")
+
+    def test_real_pdf_limits_are_reported(self):
+        path = self._make_pdf("limits.pdf", [(False, True), (False, True), (True, False)])
+        text, metadata = self._extract(path, enable_ocr=True, ocr_max_pages=1)
+        self.assertEqual(metadata["ocr_pages"], 1)
+        self.assertEqual(metadata["ocr_skipped_pages"], [2])
+        self._assert_recognized(text, self.native_marker)
+        text, metadata = self._extract(path, enable_ocr=True, max_chars=30)
+        self.assertLessEqual(len(text), 30)
+        self.assertTrue(metadata["truncated"])
+        self.assertEqual(metadata["ocr_pages"], 1)
+
+    def test_real_blank_and_invalid_images(self):
+        from PIL import Image
+
+        blank = self.base / "blank.png"
+        with Image.new("RGB", (600, 200), "white") as image:
+            image.save(blank)
+        text, metadata = self._extract(blank, enable_ocr=True)
+        self.assertEqual(text, "")
+        self.assertEqual(metadata["ocr_status"], "ocr_empty")
+        invalid = self.base / "invalid.png"
+        invalid.write_bytes(b"not an image")
+        text, metadata = self._extract(invalid, enable_ocr=True)
+        self.assertEqual(text, "")
+        self.assertEqual(metadata["ocr_status"], "ocr_failed")
+
+    def test_real_missing_language_is_reported(self):
+        path = self.base / "image.png"
+        path.write_bytes(self.scan_bytes)
+        text, metadata = self._extract(path, enable_ocr=True, ocr_language="nonexistent_language")
+        self.assertEqual(text, "")
+        self.assertEqual(metadata["ocr_status"], "ocr_failed")
+        self.assertIn("nonexistent_language", metadata["ocr_error"])
+
+    def test_real_ocr_text_is_persisted_searchable_and_reused(self):
+        repository = self.base / "source"
+        repository.mkdir()
+        self._make_pdf("source/mixed.pdf", [(True, False), (False, True)])
+        (repository / "scan.png").write_bytes(self.scan_bytes)
+        (repository / "plain.txt").write_text("PLAINTEXT REFERENCE 3815", encoding="utf-8")
+        output = self.base / "output"
+        ai = FakeAI()
+        mapper = RepositoryMapper(repository, output, MapperConfig(enable_ocr=True), ai=ai, use_chroma=False)
+        try:
+            mapper.map(export_vault_notes=False)
+            first_calls = ai.summary_calls
+            with patch("pytesseract.image_to_string", side_effect=AssertionError("Unchanged OCR should be cached")):
+                mapper.map(export_vault_notes=False)
+            self.assertEqual(ai.summary_calls, first_calls)
+        finally:
+            mapper.close()
+        index = VaultIndex(output)
+        try:
+            for path in ("mixed.pdf", "scan.png"):
+                self._assert_recognized(index.read_file_excerpt(path), self.scanned_marker)
+            self._assert_recognized(index.read_file_excerpt("mixed.pdf"), self.native_marker)
+            paths = {row["path"] for row in index.store.search("4286", 10)}
+            self.assertEqual(paths, {"mixed.pdf", "scan.png"})
+            self.assertIn("3815", index.read_file_excerpt("plain.txt"))
+        finally:
+            index.close()
 
 
 if __name__ == "__main__":

@@ -198,6 +198,14 @@ CREATE TABLE action_plans (
 
 Agents can propose actions, but applying changes is a separate approval step.
 
+Only proposed plans can be approved. Empty plans, overlapping source/destination
+paths, occupied destinations, and paths outside the repository are rejected.
+Apply and rollback revalidate the entire batch against the current filesystem
+before moving anything, including destination parent directories. A stale plan
+is left in its current state when preflight fails. These checks do not make a
+multi-file batch transactional: concurrent filesystem changes or an I/O failure
+during execution can still require manual recovery.
+
 ## 📋 `action_audit`
 
 Audit history for action plans.

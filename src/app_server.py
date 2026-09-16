@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict
 from urllib.parse import parse_qs, urlparse
 import json
+import sqlite3
 import threading
 import uuid
 import webbrowser
@@ -181,11 +182,17 @@ def create_handler(state: AppState):
             if not output:
                 self._send_json({"error": "Output folder is required"}, 400)
                 return
-            index = VaultIndex(require_index(Path(output).expanduser().resolve()))
+            index = None
             try:
-                self._send_json(index.status())
+                index = VaultIndex(require_index(Path(output).expanduser().resolve()))
+                status = index.status()
+            except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+                self._send_json({"error": str(exc)}, 400)
+                return
             finally:
-                index.close()
+                if index is not None:
+                    index.close()
+            self._send_json(status)
 
         def _send_json(self, data: Dict, status: int = 200) -> None:
             self._send(_json(data), "application/json; charset=utf-8", status)

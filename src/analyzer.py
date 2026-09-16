@@ -369,9 +369,16 @@ def _extract_image(
     return "", metadata
 
 
-def _pdf_images_with_pdf2image(path: Path, dpi: int, max_pages: int):
+def _pdf_images_with_pdf2image(path: Path, dpi: int, max_pages: int, page_numbers=None):
     from pdf2image import convert_from_path
 
+    if page_numbers is not None:
+        images = []
+        for number in page_numbers:
+            images.extend(convert_from_path(
+                str(path), dpi=dpi, first_page=number, last_page=number
+            ))
+        return images
     return convert_from_path(
         str(path),
         dpi=dpi,
@@ -380,7 +387,7 @@ def _pdf_images_with_pdf2image(path: Path, dpi: int, max_pages: int):
     )
 
 
-def _pdf_images_with_pymupdf(path: Path, dpi: int, max_pages: int):
+def _pdf_images_with_pymupdf(path: Path, dpi: int, max_pages: int, page_numbers=None):
     try:
         import fitz
         from PIL import Image
@@ -392,8 +399,9 @@ def _pdf_images_with_pymupdf(path: Path, dpi: int, max_pages: int):
     document = fitz.open(str(path))
     try:
         page_limit = len(document) if max_pages <= 0 else min(max_pages, len(document))
-        for page_number in range(page_limit):
-            page = document.load_page(page_number)
+        numbers = page_numbers if page_numbers is not None else range(1, page_limit + 1)
+        for page_number in numbers:
+            page = document.load_page(page_number - 1)
             pixmap = page.get_pixmap(
                 matrix=fitz.Matrix(scale, scale),
                 alpha=False,
@@ -410,14 +418,14 @@ def _pdf_images_with_pymupdf(path: Path, dpi: int, max_pages: int):
     return images
 
 
-def _pdf_images_for_ocr(path: Path, dpi: int, max_pages: int):
+def _pdf_images_for_ocr(path: Path, dpi: int, max_pages: int, page_numbers=None):
     errors = []
     try:
-        return _pdf_images_with_pdf2image(path, dpi, max_pages), "pdf2image"
+        return _pdf_images_with_pdf2image(path, dpi, max_pages, page_numbers), "pdf2image"
     except Exception as exc:
         errors.append(f"pdf2image/poppler failed: {exc}")
     try:
-        return _pdf_images_with_pymupdf(path, dpi, max_pages), "pymupdf"
+        return _pdf_images_with_pymupdf(path, dpi, max_pages, page_numbers), "pymupdf"
     except Exception as exc:
         errors.append(f"pymupdf failed: {exc}")
     raise RuntimeError("; ".join(errors))
@@ -429,6 +437,7 @@ def _ocr_pdf_tesseract(
     language: str,
     dpi: int,
     max_pages: int,
+    page_numbers: Optional[List[int]] = None,
 ) -> tuple[str, Dict]:
     language = _clean_ocr_language(language)
     try:
@@ -452,8 +461,9 @@ def _ocr_pdf_tesseract(
             "extracted_characters": 0,
             "truncated": False,
         }
+    images = []
     try:
-        images, renderer = _pdf_images_for_ocr(path, dpi, max_pages)
+        images, renderer = _pdf_images_for_ocr(path, dpi, max_pages, page_numbers)
         parts = []
         for image in images:
             parts.append(pytesseract.image_to_string(image, lang=language))
@@ -466,7 +476,8 @@ def _ocr_pdf_tesseract(
             "ocr_engine": "tesseract",
             "ocr_language": language,
             "ocr_dpi": dpi,
-            "ocr_pages": len(images),
+            "ocr_pages": len(parts),
+            "ocr_page_texts": dict(zip(page_numbers or range(1, len(parts) + 1), parts)),
             "ocr_max_pages": max_pages,
             "ocr_pdf_renderer": renderer,
         }, max_chars)
@@ -480,6 +491,9 @@ def _ocr_pdf_tesseract(
             "extracted_characters": 0,
             "truncated": False,
         }
+    finally:
+        for image in images:
+            image.close()
 
 
 def _extract_pdf(
@@ -494,9 +508,14 @@ def _extract_pdf(
 
     reader = PdfReader(str(path))
     pages = []
-    for page in reader.pages:
+    ocr_candidates = []
+    native_characters = 0
+    for number, page in enumerate(reader.pages, 1):
         pages.append(page.extract_text() or "")
-        if sum(len(item) for item in pages) >= max_chars:
+        native_characters += len(pages[-1])
+        if not pages[-1].strip() or len(page.images):
+            ocr_candidates.append(number)
+        if native_characters >= max_chars:
             break
     properties = {
         "format": "pdf",
@@ -506,21 +525,45 @@ def _extract_pdf(
         "subject": str((reader.metadata or {}).get("/Subject") or ""),
     }
     text = "\n\n".join(pages)
-    if text.strip():
+    if not ocr_candidates:
         properties["extraction_status"] = "extracted"
         return _finalize_extraction(text, properties, max_chars)
+    properties["ocr_candidate_pages"] = ocr_candidates
     if enable_ocr:
+        selected_pages = [
+            number for number in ocr_candidates
+            if ocr_max_pages <= 0 or number <= ocr_max_pages
+        ]
+        properties["ocr_skipped_pages"] = [
+            number for number in ocr_candidates if number not in selected_pages
+        ]
+        if not selected_pages:
+            properties.update({
+                "extraction_status": "extracted" if text.strip() else "ocr_skipped",
+                "ocr_status": "ocr_skipped",
+                "ocr_pages": 0,
+                "ocr_max_pages": ocr_max_pages,
+            })
+            return _finalize_extraction(text, properties, max_chars)
         ocr_text, ocr_properties = _ocr_pdf_tesseract(
-            path, max_chars, ocr_language, ocr_dpi, ocr_max_pages
+            path, max_chars, ocr_language, ocr_dpi, ocr_max_pages, page_numbers=selected_pages
         )
-        ocr_properties.update({
-            "page_count": len(reader.pages),
-            "title": properties["title"],
-            "author": properties["author"],
-            "subject": properties["subject"],
-        })
-        return ocr_text, ocr_properties
-    properties["extraction_status"] = "ocr_required"
+        page_texts = ocr_properties.pop("ocr_page_texts", {})
+        if not page_texts and ocr_text:
+            page_texts = {selected_pages[0]: ocr_text}
+        for number, recognized in page_texts.items():
+            native = pages[number - 1]
+            native_lines = {" ".join(line.split()).casefold() for line in native.splitlines()}
+            additions = [
+                line for line in recognized.splitlines()
+                if line.strip() and " ".join(line.split()).casefold() not in native_lines
+            ]
+            pages[number - 1] = "\n".join([native.strip()] + additions).strip()
+        properties.update(ocr_properties)
+        properties["ocr_status"] = ocr_properties["extraction_status"]
+        return _finalize_extraction("\n\n".join(pages), properties, max_chars)
+    properties["extraction_status"] = "extracted" if text.strip() else "ocr_required"
+    properties["ocr_status"] = "ocr_required"
     return _finalize_extraction(text, properties, max_chars)
 
 
@@ -670,6 +713,14 @@ def extract_content(
             vision_confidence,
             vision_max_detections,
         )
+    if suffix in OCR_IMAGE_EXTENSIONS:
+        return "", {
+            "format": suffix.lstrip("."),
+            "extraction_status": "ocr_required",
+            "ocr_status": "ocr_required",
+            "extracted_characters": 0,
+            "truncated": False,
+        }
     data = path.read_bytes()
     if is_probably_binary(data):
         if (enable_ocr or enable_vision) and suffix in OCR_IMAGE_EXTENSIONS:

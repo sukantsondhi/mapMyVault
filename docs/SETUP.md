@@ -99,19 +99,29 @@ Use the sidebar:
 
 - `Chat`: ask questions against an existing local index.
 - `Knowledge`: create or update the local index.
-- `Graph View`: browse indexed folders, remove indexed folders/files, and update only changed work.
+- `Explorer`: filter and preview files, manage exclusions, and view recorded connections.
+
+The **Active index** picker is shared by all views. Changing it clears chat and
+attachments and stops the MCP process started by this session. The repository's
+Streamlit configuration uses a light theme, loopback binding, and disabled usage
+statistics. Studio requires Streamlit 1.49 or newer and the Python `graphviz` package,
+both included in the standard dependencies.
 
 ## 🗂️ 4. Create Your First Local Index
 
 In `Knowledge`:
 
 1. Choose your source folder.
-2. Choose an output folder outside the source folder.
-3. Select which top-level folders/files should be indexed.
-4. Select the embedding model.
+2. Set **Active index / Index folder** in the sidebar to an output folder outside the source.
+3. Open **Source contents** to exclude any top-level folders/files.
+4. Select the chat and embedding models under **Source & models**.
 5. Enable OCR only if you need scanned PDF/image text extraction.
 6. Enable YOLO only if you have image files and have completed the YOLO setup below.
-7. Click `Generate / Update Local LLM Index`.
+7. Click `Build index` (or `Update index` for an existing index).
+
+OCR is off by default. Explorer updates keep the extraction settings stored with
+the index. Obsidian export and MCP start/stop controls are in **Export & connect**.
+Chat remains available for exact counts without model generation.
 
 Good output path example:
 
@@ -192,7 +202,7 @@ dir models\*.pt
 In Streamlit Studio:
 
 1. Open `Knowledge`.
-2. Enable `Enable local YOLO object labels for image files`.
+2. Expand **Object detection / YOLO** and enable **Enable local object detection**.
 3. Pick `yolov8n.pt` from the dropdown.
 
 CLI example:

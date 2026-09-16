@@ -61,7 +61,7 @@ class MapperConfig:
             "relationship": self.relationship_prompt_version,
             "embedding": self.embedding_model,
             "ocr": (
-                f"{self.ocr_engine}:{self.ocr_language}:"
+                f"ocr-v2:{self.ocr_engine}:{self.ocr_language}:"
                 f"{self.ocr_dpi}:{self.ocr_max_pages}:{self.enable_ocr}"
             ),
             "vision": (
